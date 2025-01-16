@@ -1,0 +1,7 @@
+# Ignorar arquivos de dados
+*.csv
+*.xlsx
+*.parquet
+
+# # Ignorar diretórios
+# pasta_de_dados/
