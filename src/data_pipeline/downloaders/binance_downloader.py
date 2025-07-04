@@ -265,8 +265,9 @@ class BinanceDataDownloader:
                 except:
                     continue
 
-            # If we couldn't verify parquet, fall through to check other states
-            self.logger.warning(f"⚠️  {date_str} marked as processed but parquet not verified")
+            # If we couldn't verify parquet, just continue checking other states
+            # Don't log warning here as it creates too much noise
+            pass
 
         # Check if CSV exists
         if csv_file.exists():
@@ -304,7 +305,8 @@ class BinanceDataDownloader:
     def download_file(self, url: str, dest_path: Path) -> bool:
         """Download a file with progress bar"""
         try:
-            response = requests.get(url, stream=True)
+            # Use longer timeout for large files (30 minutes total)
+            response = requests.get(url, stream=True, timeout=(30, 1800))
             response.raise_for_status()
 
             total_size = int(response.headers.get('content-length', 0))
@@ -349,14 +351,7 @@ class BinanceDataDownloader:
 
         if state == 'csv_ready':
             self.logger.info(f"⏭️  Skipping download for {file_suffix} - CSV already exists")
-            # Clean up any leftover ZIP files
-            if zip_file.exists():
-                try:
-                    zip_file.unlink()
-                    checksum_file.unlink(missing_ok=True)
-                    self.logger.info(f"🗑️  Cleaned up leftover ZIP: {zip_file.name}")
-                except Exception as e:
-                    self.logger.warning(f"⚠️  Could not cleanup leftover ZIP {zip_file.name}: {e}")
+            # Don't try to clean up ZIP files here - they might not exist
             return None, None
 
         if state == 'zip_ready':
@@ -422,29 +417,13 @@ class BinanceDataDownloader:
                     # Check if CSV already exists
                     if csv_path.exists():
                         self.logger.info(f"✅ CSV already exists: {csv_filename}, skipping extraction")
-                        # Delete ZIP file since CSV is ready
-                        try:
-                            zip_path.unlink()
-                            checksum_path = zip_path.with_suffix('.zip.CHECKSUM')
-                            checksum_path.unlink(missing_ok=True)
-                            self.logger.info(f"🗑️  Cleaned up ZIP file: {zip_path.name}")
-                        except Exception as cleanup_e:
-                            self.logger.warning(f"⚠️  Could not cleanup ZIP {zip_path.name}: {cleanup_e}")
                         return csv_path
 
                     # Extract CSV
                     zf.extract(csv_filename, self.raw_dir)
                     self.logger.info(f"✅ Extracted: {csv_filename}")
 
-                    # Delete ZIP file after successful extraction
-                    try:
-                        zip_path.unlink()
-                        checksum_path = zip_path.with_suffix('.zip.CHECKSUM')
-                        checksum_path.unlink(missing_ok=True)
-                        self.logger.info(f"🗑️  Cleaned up ZIP file: {zip_path.name}")
-                    except Exception as cleanup_e:
-                        self.logger.warning(f"⚠️  Could not cleanup ZIP {zip_path.name}: {cleanup_e}")
-
+                    # Keep ZIP file - don't delete in step 1
                     return csv_path
 
             return None
@@ -769,6 +748,31 @@ class BinanceDataDownloader:
 
         return False
 
+    def cleanup_orphaned_zips(self) -> int:
+        """Clean up ZIP files where CSV already exists"""
+        cleaned_count = 0
+        
+        # Find all ZIP files
+        zip_files = list(self.raw_dir.glob(f"{self.symbol}-trades-*.zip"))
+        
+        for zip_file in zip_files:
+            # Check if corresponding CSV exists
+            csv_file = zip_file.with_suffix('.csv')
+            if csv_file.exists():
+                try:
+                    zip_file.unlink()
+                    checksum_file = zip_file.with_suffix('.zip.CHECKSUM')
+                    checksum_file.unlink(missing_ok=True)
+                    self.logger.info(f"🗑️  Cleaned up orphaned ZIP: {zip_file.name}")
+                    cleaned_count += 1
+                except Exception as e:
+                    self.logger.warning(f"⚠️  Could not cleanup {zip_file.name}: {e}")
+        
+        if cleaned_count > 0:
+            self.logger.info(f"✅ Cleaned up {cleaned_count} orphaned ZIP files")
+        
+        return cleaned_count
+
     def print_download_summary(self, total_dates: int, successful: int, failed: int):
         """Print a summary of the download operation"""
         processed_count = len(self.progress.get('processed', []))
@@ -867,23 +871,33 @@ class BinanceDataDownloader:
 
         if failed_downloads:
             self.logger.warning(f"⚠️  Failed to download {len(failed_downloads)} files")
-            # Group by reason if possible
-            weekends = [d for d in failed_downloads if d.weekday() in [5, 6]]
-            others = [d for d in failed_downloads if d.weekday() not in [5, 6]]
+            
+            # For monthly data, weekend logic doesn't apply (monthly data is always available)
+            if self.granularity == "daily":
+                # Group by reason if possible
+                weekends = [d for d in failed_downloads if d.weekday() in [5, 6]]
+                others = [d for d in failed_downloads if d.weekday() not in [5, 6]]
 
-            if weekends:
-                self.logger.info(f"  Weekends (no trading): {len(weekends)} days")
-                for date in weekends[:5]:
-                    self.logger.info(f"    - {date.strftime('%Y-%m-%d (%A)')}")
-                if len(weekends) > 5:
-                    self.logger.info(f"    ... and {len(weekends) - 5} more")
+                if weekends:
+                    self.logger.info(f"  Weekends (no trading): {len(weekends)} days")
+                    for date in weekends[:5]:
+                        self.logger.info(f"    - {date.strftime('%Y-%m-%d (%A)')}")
+                    if len(weekends) > 5:
+                        self.logger.info(f"    ... and {len(weekends) - 5} more")
 
-            if others:
-                self.logger.info(f"  Other missing dates: {len(others)} days")
-                for date in others[:10]:
-                    self.logger.info(f"    - {date.strftime('%Y-%m-%d (%A)')}")
-                if len(others) > 10:
-                    self.logger.info(f"    ... and {len(others) - 10} more")
+                if others:
+                    self.logger.info(f"  Other missing dates: {len(others)} days")
+                    for date in others[:10]:
+                        self.logger.info(f"    - {date.strftime('%Y-%m-%d (%A)')}")
+                    if len(others) > 10:
+                        self.logger.info(f"    ... and {len(others) - 10} more")
+            else:
+                # For monthly data, all failures are "other" (not weekend-related)
+                self.logger.info(f"  Failed monthly downloads: {len(failed_downloads)} months")
+                for date in failed_downloads[:10]:
+                    self.logger.info(f"    - {date.strftime('%Y-%m')}")
+                if len(failed_downloads) > 10:
+                    self.logger.info(f"    ... and {len(failed_downloads) - 10} more")
 
             # Save failed downloads to file
             failed_downloads_path = self.base_dir / 'failed_downloads.txt'
@@ -991,6 +1005,10 @@ class BinanceDataDownloader:
         # Print summary
         self.print_download_summary(len(dates), len(downloaded_files), len(failed_downloads))
 
+        # Verify all downloads with checksums
+        if downloaded_files:
+            self.verify_all_downloads(dates)
+
         # Verify data integrity
         self.verify_data_integrity()
 
@@ -1064,6 +1082,70 @@ class BinanceDataDownloader:
             self.logger.info(f"✅ Removed {len(missing_from_parquet)} invalid entries from progress tracking")
         else:
             self.logger.info(f"✅ Data integrity verified: All {len(processed_dates)} processed dates are in Parquet files")
+            
+    def verify_all_downloads(self, expected_dates: List[datetime]) -> bool:
+        """
+        Final verification of all downloaded files with hash validation
+        
+        Returns:
+            True if all files are valid, False otherwise
+        """
+        self.logger.info("\n" + "="*60)
+        self.logger.info(" 🔍 Final Download Verification ")
+        self.logger.info("="*60)
+        
+        all_valid = True
+        verified_count = 0
+        missing_count = 0
+        invalid_count = 0
+        
+        for date in expected_dates:
+            if self.granularity == "daily":
+                file_suffix = f"{date.year}-{date.month:02d}-{date.day:02d}"
+            else:
+                file_suffix = f"{date.year}-{date.month:02d}"
+                
+            zip_file = self.raw_dir / f"{self.symbol}-trades-{file_suffix}.zip"
+            checksum_file = self.raw_dir / f"{self.symbol}-trades-{file_suffix}.zip.CHECKSUM"
+            
+            # Check if files exist
+            if not zip_file.exists():
+                self.logger.warning(f"❌ Missing ZIP: {zip_file.name}")
+                missing_count += 1
+                all_valid = False
+                continue
+                
+            if not checksum_file.exists():
+                self.logger.warning(f"❌ Missing checksum: {checksum_file.name}")
+                missing_count += 1
+                all_valid = False
+                continue
+                
+            # Verify checksum
+            if self.verify_checksum(zip_file, checksum_file):
+                verified_count += 1
+                self.logger.info(f"✅ Verified: {zip_file.name}")
+            else:
+                self.logger.error(f"❌ Invalid checksum: {zip_file.name}")
+                invalid_count += 1
+                all_valid = False
+                
+        # Summary
+        self.logger.info("\n" + "="*60)
+        self.logger.info(" 📊 Verification Summary ")
+        self.logger.info("="*60)
+        self.logger.info(f"Total expected files: {len(expected_dates)}")
+        self.logger.info(f"✅ Verified with valid checksums: {verified_count}")
+        self.logger.info(f"❌ Missing files: {missing_count}")
+        self.logger.info(f"❌ Invalid checksums: {invalid_count}")
+        
+        if all_valid:
+            self.logger.info("\n✅ All downloads verified successfully!")
+        else:
+            self.logger.error("\n❌ Download verification failed!")
+            self.logger.info("💡 Run the download again to retry failed files")
+            
+        return all_valid
 
     def verify_optimized_integrity(self, cleanup_old_files: bool = False):
         """Verify integrity of optimized parquet files and optionally cleanup old files"""

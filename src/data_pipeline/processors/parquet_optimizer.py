@@ -12,6 +12,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime
 import logging
+import sys
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+from validators.missing_dates_validator import MissingDatesValidator
 
 class EnhancedParquetOptimizer:
     def __init__(self, source_dir: str, target_dir: str, max_size_gb: int = 10):
@@ -64,12 +69,53 @@ class EnhancedParquetOptimizer:
             self.logger.error(f"Error verifying {file_path.name}: {e}")
             return False
     
+    def check_missing_dates(self) -> bool:
+        """Check for missing dates before optimization"""
+        self.logger.info("\n🔍 Checking for missing dates in the dataset...")
+        
+        # Initialize validator
+        validator = MissingDatesValidator(str(self.source_dir), "BTCUSDT")
+        report = validator.generate_report(check_daily_gaps=False)
+        
+        # Print summary
+        summary = report['summary']
+        self.logger.info(f"📊 Data completeness: {summary['completeness_percentage']:.1f}%")
+        
+        if report['missing_months']:
+            self.logger.warning(f"⚠️  Found {len(report['missing_months'])} missing months:")
+            for missing in report['missing_months'][:10]:  # Show first 10
+                self.logger.warning(f"   - {missing['date_str']}")
+            if len(report['missing_months']) > 10:
+                self.logger.warning(f"   ... and {len(report['missing_months']) - 10} more")
+            
+            # Ask user if they want to continue
+            if not self._auto_confirm:
+                print("\n" + "="*60)
+                print("⚠️  MISSING DATA DETECTED")
+                print("="*60)
+                print(f"There are {len(report['missing_months'])} missing months in the dataset.")
+                print("This might affect your analysis or model training.")
+                response = input("\nDo you want to continue with optimization anyway? (yes/no): ").strip().lower()
+                if response != 'yes':
+                    self.logger.info("Optimization cancelled by user.")
+                    return False
+            else:
+                self.logger.warning("Auto-confirm enabled. Proceeding despite missing data.")
+        else:
+            self.logger.info("✅ No missing months detected!")
+        
+        return True
+    
     def optimize_parquet_files(self):
         """Main optimization process with enhanced verification"""
         self.logger.info("🚀 Starting Enhanced Parquet optimization process")
         self.logger.info(f"Source: {self.source_dir}")
         self.logger.info(f"Target: {self.target_dir}")
         self.logger.info(f"Max file size: {self.max_size_bytes / (1024**3):.1f} GB")
+        
+        # Check for missing dates first
+        if not self.check_missing_dates():
+            return
         
         # Get all parquet files
         source_files = sorted(glob.glob(str(self.source_dir / "*.parquet")))
@@ -123,7 +169,7 @@ class EnhancedParquetOptimizer:
             ('quoteQty', pa.float64()),
             ('time', pa.timestamp('ns')),
             ('isBuyerMaker', pa.bool_()),
-            ('isBestMatch', pa.float64())
+            ('isBestMatch', pa.bool_())
         ])
         
         try:
@@ -136,8 +182,28 @@ class EnhancedParquetOptimizer:
                 
                 # Standardize schema
                 if 'isBestMatch' not in table.column_names:
-                    null_column = pa.array([None] * len(table), type=pa.float64())
+                    # Add missing column as boolean
+                    null_column = pa.array([None] * len(table), type=pa.bool_())
                     table = table.append_column('isBestMatch', null_column)
+                else:
+                    # Check if isBestMatch needs type conversion
+                    isBestMatch_col = table.column('isBestMatch')
+                    if isBestMatch_col.type != pa.bool_():
+                        # Convert to boolean
+                        self.logger.info(f"  Converting isBestMatch from {isBestMatch_col.type} to bool")
+                        # If numeric, convert non-zero to True
+                        if pa.types.is_floating(isBestMatch_col.type) or pa.types.is_integer(isBestMatch_col.type):
+                            bool_array = pa.compute.not_equal(isBestMatch_col, pa.scalar(0))
+                        else:
+                            # For other types, convert to bool directly
+                            bool_array = pa.compute.cast(isBestMatch_col, pa.bool_())
+                        
+                        # Replace the column
+                        table = table.drop(['isBestMatch'])
+                        table = table.append_column('isBestMatch', bool_array)
+                
+                # Ensure columns are in the correct order
+                table = table.select(['trade_id', 'price', 'qty', 'quoteQty', 'time', 'isBuyerMaker', 'isBestMatch'])
                 
                 file_size = file_info['size']
                 
