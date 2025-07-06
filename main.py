@@ -18,11 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.data_pipeline.extractors.csv_extractor import CSVExtractor
 from src.data_pipeline.converters.csv_to_parquet import CSVToParquetConverter
 from src.data_pipeline.processors.parquet_optimizer import main as optimize_main
-from src.data_pipeline.validators.quick_validator import main as quick_validate_main
-from src.data_pipeline.validators.advanced_validator import main as advanced_validate_main
 from src.data_pipeline.validators.missing_dates_validator import main as missing_dates_main
-from src.data_pipeline.validators.data_integrity_validator import DataIntegrityValidator
 from src.features.imbalance_bars import main as imbalance_main
+from reoptimize_parquet_files_streaming import reoptimize_directory_streaming
 
 
 def setup_logging():
@@ -268,14 +266,16 @@ def display_pipeline_menu(config: PipelineConfig):
     print("="*60)
 
     print("\nPipeline Steps:")
-    print(f"1. {'✅' if status['zip_downloaded'] and status['csv_extracted'] and status['csv_validated'] else '⬜'}📥 Download ZIP data, extract and validate CSV (always re-extracts)")
-    print(f"2. {'✅' if status['parquet_converted'] else '⬜'}🔍 Convert CSV to Parquet with verification and auto-cleanup")
-    print(f"3. {'✅' if status['parquet_optimized'] else '⬜'}🔧 Optimize Parquet files")
-    print(f"4. {'✅' if status['data_validated'] else '⬜'}✅ Validate optimized data integrity")
-    print(f"5. {'✅' if status['features_generated'] else '⬜'}📊 Generate features")
-    print("6. 🗑️  Clean ZIP and CHECKSUM files")
-    print("7. 📅 Add missing daily data")
-    print("8. 🚪 Exit")
+    print(f"1. {'✅' if status['zip_downloaded'] else '⬜'}📥 Download ZIP data with checksum verification")
+    print(f"2. {'✅' if status['parquet_converted'] else '⬜'}🔄 ZIP → CSV → Parquet Pipeline (Integrity-First)")
+    print(f"3. {'✅' if status['parquet_converted'] else '⬜'}🔍 Validate Parquet files integrity")
+    print(f"4. {'✅' if status['parquet_optimized'] else '⬜'}🔧 Optimize Parquet files")
+    print(f"5. {'✅' if status['data_validated'] else '⬜'}📅 Validate missing dates (recommended)")
+    print(f"6. {'✅' if status['features_generated'] else '⬜'}📊 Generate features")
+    print("7. 🗑️  Clean ZIP and CHECKSUM files")
+    print("8. 📅 Add missing daily data")
+    print("9. 🔧 Re-optimize parquet files (streaming)")
+    print("10. 🚪 Exit")
 
     return status
 
@@ -802,14 +802,217 @@ def add_missing_daily_data(config: PipelineConfig):
     input("\nPress Enter to continue...")
 
 
-def run_download_and_extract(config: PipelineConfig):
-    """Step 1: Download ZIP files with hash verification, extract to CSV, and validate"""
+def run_download_only(config: PipelineConfig):
+    """Step 1: Download ZIP files with checksum verification only"""
     print("\n" + "="*60)
-    print(" 📥 Step 1: Download ZIP Data, Extract and Validate CSV ")
+    print(" 📥 Step 1: Download ZIP Data with Checksum Verification ")
     print("="*60)
 
     # Log the start of operation
-    logging.info(f"Starting Step 1: Download and Extract for {config.symbol} {config.data_type} {config.granularity}")
+    logging.info(f"Starting Step 1: Download Only for {config.symbol} {config.data_type} {config.granularity}")
+
+    # Get existing data range for suggestions
+    first_available, last_available = get_data_date_range(
+        config.symbol, config.data_type, config.futures_type, config.granularity
+    )
+
+    # Get date range
+    print(f"\n📅 Enter date range for {config.granularity} data:")
+
+    # Import datetime for date suggestions
+    from datetime import datetime, timedelta
+    current_date = datetime.now()
+
+    if config.granularity == 'daily':
+        date_format = "YYYY-MM-DD"
+        if first_available and last_available and first_available != "data-exists":
+            print(f"💡 Available data range: {first_available} to {last_available}")
+            print(f"📊 Most recent data: {last_available}")
+            example_start = last_available  # Suggest continuing from last available
+            # Suggest next day after last available
+            try:
+                last_date = datetime.strptime(last_available, "%Y-%m-%d")
+                next_date = last_date + timedelta(days=1)
+                example_start = next_date.strftime("%Y-%m-%d")
+            except:
+                example_start = current_date.strftime("%Y-%m-%d")
+            example_end = current_date.strftime("%Y-%m-%d")
+        else:
+            # Different suggestions based on data type
+            if config.data_type == "spot":
+                example_start = "2024-01-01"
+                example_end = "2024-01-31"
+                print(f"💡 No existing data found. Binance spot data available from 2017-08-17")
+            else:  # futures
+                example_start = "2019-09-08"  # Futures daily data typically started around this date
+                example_end = "2019-09-30"
+                print(f"💡 No existing data found. Binance futures data typically available from 2019-09-08")
+    else:
+        date_format = "YYYY-MM"
+        if first_available and last_available and first_available != "data-exists":
+            print(f"💡 Available data range: {first_available} to {last_available}")
+            print(f"📊 Most recent data: {last_available}")
+            # Suggest next month after last available
+            try:
+                last_date = datetime.strptime(last_available + "-01", "%Y-%m-%d")
+                if last_date.month == 12:
+                    next_date = last_date.replace(year=last_date.year + 1, month=1)
+                else:
+                    next_date = last_date.replace(month=last_date.month + 1)
+                example_start = next_date.strftime("%Y-%m")
+            except:
+                example_start = current_date.strftime("%Y-%m")
+            example_end = current_date.strftime("%Y-%m")
+        else:
+            # Different suggestions based on data type
+            if config.data_type == "spot":
+                example_start = "2024-01"
+                example_end = "2024-12"
+                print(f"💡 No existing data found. Binance spot data available from 2017-08")
+            else:  # futures
+                example_start = "2019-09"  # Futures typically started later
+                example_end = "2024-12"
+                print(f"💡 No existing data found. Binance futures data typically available from 2019-09")
+
+    while True:
+        start_date = input(f"Start date ({date_format}, e.g., {example_start}): ").strip()
+        if start_date:
+            config.start_date = start_date
+            break
+        print("❌ Start date is required.")
+
+    while True:
+        end_date = input(f"End date ({date_format}, e.g., {example_end}): ").strip()
+        if end_date:
+            config.end_date = end_date
+            break
+        print("❌ End date is required.")
+
+    # Get workers
+    workers_input = input("\nNumber of concurrent downloads (default: 5): ").strip()
+    config.workers = int(workers_input) if workers_input.isdigit() else 5
+
+    # Show summary
+    print(f"\n📋 Download Configuration:")
+    print(f"   Date Range: {config.start_date} to {config.end_date}")
+    print(f"   Workers: {config.workers}")
+
+    confirm = input("\n🚀 Proceed with download? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ Download cancelled.")
+        return
+
+    # Build command line arguments
+    download_args = [
+        'binance_downloader.py', 'download',
+        '--symbol', config.symbol,
+        '--type', config.data_type,
+        '--granularity', config.granularity,
+        '--start', config.start_date,
+        '--end', config.end_date,
+        '--workers', str(config.workers)
+    ]
+
+    if config.data_type == 'futures':
+        download_args.extend(['--futures-type', config.futures_type])
+
+    # Set sys.argv for the downloader
+    original_argv = sys.argv.copy()
+    sys.argv = download_args
+
+    try:
+        # Use a custom approach that only downloads ZIP files
+        from src.data_pipeline.downloaders.binance_downloader import BinanceDataDownloader
+        import concurrent.futures
+
+        downloader = BinanceDataDownloader(
+            symbol=config.symbol,
+            data_type=config.data_type,
+            futures_type=config.futures_type,
+            granularity=config.granularity
+        )
+
+        # Generate date range
+        start = datetime.strptime(config.start_date, '%Y-%m-%d' if config.granularity == 'daily' else '%Y-%m')
+        end = datetime.strptime(config.end_date, '%Y-%m-%d' if config.granularity == 'daily' else '%Y-%m')
+        dates = downloader.generate_dates(start, end)
+
+        print(f"\n📥 Downloading {len(dates)} ZIP files with CHECKSUM verification...")
+        logging.info(f"Download phase: {len(dates)} files to process for date range {config.start_date} to {config.end_date}")
+
+        # Download only ZIP files, skip processing
+        downloaded_count = 0
+        failed_count = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.workers) as executor:
+            future_to_date = {
+                executor.submit(downloader.download_with_checksum, date): date
+                for date in dates
+            }
+
+            for future in concurrent.futures.as_completed(future_to_date):
+                date = future_to_date[future]
+                try:
+                    zip_file, checksum_file = future.result()
+                    if zip_file and checksum_file:
+                        downloaded_count += 1
+                        print(f"✅ Downloaded: {zip_file.name}")
+                    else:
+                        # Check why download returned None
+                        date_str = date.strftime('%Y-%m-%d' if config.granularity == 'daily' else '%Y-%m')
+                        zip_name = f"{config.symbol}-trades-{date_str}.zip"
+                        csv_name = f"{config.symbol}-trades-{date_str}.csv"
+
+                        if (downloader.raw_dir / csv_name).exists():
+                            print(f"⏭️ CSV already exists: {csv_name}")
+                        elif (downloader.raw_dir / zip_name).exists():
+                            print(f"📦 ZIP exists: {zip_name}")
+                        else:
+                            failed_count += 1
+                            print(f"❌ Download failed: {zip_name}")
+                except Exception as e:
+                    failed_count += 1
+                    print(f"❌ Error downloading {date}: {e}")
+
+        print(f"\n✅ Download completed: {downloaded_count} downloaded, {failed_count} failed")
+        logging.info(f"Download completed: {downloaded_count} downloaded, {failed_count} failed")
+
+        # Pipeline completion message
+        print("\n" + "="*60)
+        print(" 🎉 Step 1 Completed: ZIP Files Ready! ")
+        print("="*60)
+        print("\n📌 ZIP files have been downloaded with checksum verification.")
+
+        # Determine ZIP location
+        if config.data_type == "spot":
+            zip_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / "spot"
+        else:
+            zip_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / f"futures-{config.futures_type}"
+
+        print("📁 Location: " + str(zip_dir))
+        print("\n🔄 Next Steps (run these commands separately):")
+        print("   1️⃣ Extract CSV from ZIP: python main.py (Step 2)")
+        print("   2️⃣ CSV to Parquet conversion: python main.py (Step 3)")
+        print("   3️⃣ Parquet optimization: python main.py (Step 4)")
+        print("   4️⃣ Data validation: python main.py (Step 5)")
+        print("   5️⃣ Feature generation: python main.py (Step 6)")
+        print("\n💡 Or use the interactive menu to continue with the next steps.")
+
+    except Exception as e:
+        print(f"\n❌ Download failed: {e}")
+        logging.error(f"Download failed: {e}", exc_info=True)
+    finally:
+        sys.argv = original_argv
+
+
+def run_download_and_extract_backup(config: PipelineConfig):
+    """BACKUP: Original Step 1 function with download, extract and validate"""
+    print("\n" + "="*60)
+    print(" 📥 BACKUP: Download ZIP Data, Extract and Validate CSV ")
+    print("="*60)
+
+    # Log the start of operation
+    logging.info(f"Starting BACKUP Step 1: Download and Extract for {config.symbol} {config.data_type} {config.granularity}")
 
     # Get existing data range for suggestions
     first_available, last_available = get_data_date_range(
@@ -1066,10 +1269,320 @@ def run_download_and_extract(config: PipelineConfig):
         sys.argv = original_argv
 
 
-def run_csv_to_parquet_conversion(config: PipelineConfig):
-    """Step 2: Convert CSV to Parquet with verification and auto-cleanup"""
+def run_csv_extraction_backup(config: PipelineConfig):
+    """BACKUP: Original Step 2 - Extract CSV files from ZIP archives and validate"""
+    print("\n" + "="*60)
+    print(" 📦 BACKUP: Extract CSV from ZIP Archives ")
+    print("="*60)
+
+    # Log the start of operation
+    logging.info(f"Starting BACKUP Step 2: CSV Extraction for {config.symbol} {config.data_type} {config.granularity}")
+
+    # Check if ZIP files exist
+    if config.data_type == "spot":
+        zip_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / "spot"
+    else:
+        zip_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / f"futures-{config.futures_type}"
+
+    if not zip_dir.exists():
+        print(f"❌ ZIP directory not found: {zip_dir}")
+        print("💡 Please run Step 1 first to download ZIP files")
+        return
+
+    zip_files = list(zip_dir.glob(f"{config.symbol}-trades-*.zip"))
+    if not zip_files:
+        print(f"❌ No ZIP files found in {zip_dir}")
+        print("💡 Please run Step 1 first to download ZIP files")
+        return
+
+    print(f"📦 Found {len(zip_files)} ZIP files to extract")
+
+    confirm = input("\n🚀 Proceed with CSV extraction? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ CSV extraction cancelled.")
+        return
+
+    try:
+        # Extract CSV files from downloaded ZIPs
+        print("\n📦 Extracting CSV files from ZIP archives...")
+
+        extractor = CSVExtractor(
+            symbol=config.symbol,
+            data_type=config.data_type,
+            futures_type=config.futures_type,
+            granularity=config.granularity
+        )
+
+        # Force re-extraction to ensure fresh data
+        successful, failed = extractor.extract_and_verify_all(force_reextract=True)
+
+        if successful > 0:
+            print(f"\n✅ Extraction completed: {successful} files extracted")
+            logging.info(f"Extraction completed: {successful} files extracted")
+            if failed > 0:
+                print(f"⚠️ {failed} files failed extraction")
+                logging.warning(f"{failed} files failed extraction")
+
+            # CSV Validation
+            print("\n🔍 Validating extracted CSV files...")
+
+            # Get extracted CSV files
+            if config.data_type == "spot":
+                raw_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / "spot"
+            else:
+                raw_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / f"futures-{config.futures_type}"
+
+            csv_files = list(raw_dir.glob(f"{config.symbol}-trades-*.csv"))
+            print(f"📄 Found {len(csv_files)} CSV files to validate")
+
+            # Enhanced validation of CSV files using extractor's verify method
+            validation_passed = True
+            validation_details = []
+
+            print("\n📊 Performing comprehensive CSV validation...")
+            print("   - Timestamp UTC conversion check")
+            print("   - Missing dates detection")
+            print("   - Data integrity verification")
+
+            # Validate all files (or sample if too many)
+            files_to_validate = csv_files if len(csv_files) <= 10 else csv_files[:10]
+
+            for csv_file in files_to_validate:
+                print(f"\n   📄 Validating {csv_file.name}...")
+                if extractor.verify_csv_integrity(csv_file):
+                    validation_details.append(f"✅ {csv_file.name}")
+                else:
+                    validation_details.append(f"❌ {csv_file.name}")
+                    validation_passed = False
+
+            if len(csv_files) > 10:
+                print(f"\n   ... and {len(csv_files) - 10} more files")
+
+            if validation_passed:
+                print("\n✅ CSV validation passed!")
+                logging.info("CSV validation passed successfully")
+            else:
+                print("\n⚠️ Some CSV files failed validation")
+                logging.warning(f"CSV validation failed - details: {validation_details}")
+
+            # Pipeline completion message
+            print("\n" + "="*60)
+            print(" 🎉 Step 2 Completed: CSV Files Ready! ")
+            print("="*60)
+            print("\n📌 CSV files have been extracted and validated successfully.")
+            print("📁 Location: " + str(raw_dir))
+            print("\n🔄 Next Steps (run these commands separately):")
+            print("   3️⃣ CSV to Parquet conversion: python main.py")
+            print("   4️⃣ Parquet optimization: python main.py")
+            print("   5️⃣ Data validation: python main.py")
+            print("   6️⃣ Feature generation: python main.py")
+            print("\n💡 Or use the interactive menu to continue with the next steps.")
+
+        else:
+            print(f"\n❌ Extraction failed: {failed} files failed")
+            logging.error(f"Extraction failed: {failed} files failed")
+
+    except Exception as e:
+        print(f"\n❌ CSV extraction failed: {e}")
+        logging.error(f"CSV extraction failed: {e}", exc_info=True)
+
+
+def run_zip_to_parquet_pipeline(config: PipelineConfig):
+    """Step 2: ZIP → CSV → Parquet Pipeline with integrity validation and auto-conversion"""
+    print("\n" + "="*70)
+    print(" 🔄 Step 2: ZIP → CSV → Parquet Pipeline (Integrity-First) ")
+    print("="*70)
+
+    # Log the start of operation
+    logging.info(f"Starting Step 2: ZIP to Parquet Pipeline for {config.symbol} {config.data_type} {config.granularity}")
+
+    # Check if ZIP files exist
+    if config.data_type == "spot":
+        zip_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / "spot"
+        parquet_dir = Path("datasets") / f"dataset-raw-{config.granularity}-compressed" / "spot"
+    else:
+        zip_dir = Path("datasets") / f"dataset-raw-{config.granularity}" / f"futures-{config.futures_type}"
+        parquet_dir = Path("datasets") / f"dataset-raw-{config.granularity}-compressed" / f"futures-{config.futures_type}"
+
+    if not zip_dir.exists():
+        print(f"❌ ZIP directory not found: {zip_dir}")
+        print("💡 Please run Step 1 first to download ZIP files")
+        return
+
+    zip_files = list(zip_dir.glob(f"{config.symbol}-trades-*.zip"))
+    if not zip_files:
+        print(f"❌ No ZIP files found in {zip_dir}")
+        print("💡 Please run Step 1 first to download ZIP files")
+        return
+
+    print(f"📦 Found {len(zip_files)} ZIP files to process")
+    print(f"📁 Source: {zip_dir}")
+    print(f"📁 Target: {parquet_dir}")
+
+    print("\n💡 Integrated Process:")
+    print("   🔄 Extract CSV from each ZIP file")
+    print("   🔍 Verify CSV integrity and data quality")
+    print("   ✅ If valid: Convert to Parquet and delete CSV")
+    print("   ❌ If invalid: Signal error and stop processing")
+    print("   📦 Keep ZIP files as backup")
+
+    confirm = input("\n🚀 Proceed with ZIP → Parquet pipeline? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ Pipeline cancelled.")
+        return
+
+    try:
+        # Initialize components
+        from src.data_pipeline.extractors.csv_extractor import CSVExtractor
+        from src.data_pipeline.converters.csv_to_parquet import CSVToParquetConverter
+
+        extractor = CSVExtractor(
+            symbol=config.symbol,
+            data_type=config.data_type,
+            futures_type=config.futures_type,
+            granularity=config.granularity
+        )
+
+        converter = CSVToParquetConverter(
+            symbol=config.symbol,
+            data_type=config.data_type,
+            futures_type=config.futures_type,
+            granularity=config.granularity
+        )
+
+        # Ensure parquet directory exists
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+
+        # Process each ZIP file individually
+        total_processed = 0
+        total_failed = 0
+        total_converted = 0
+
+        print(f"\n🔄 Processing {len(zip_files)} ZIP files...")
+
+        for i, zip_file in enumerate(sorted(zip_files), 1):
+            print(f"\n📦 [{i}/{len(zip_files)}] Processing: {zip_file.name}")
+
+            # Check if parquet already exists
+            date_str = zip_file.stem.split('-trades-')[1]  # Extract date from filename
+            parquet_pattern = f"{config.symbol}-Trades-{date_str}*.parquet"
+            existing_parquet = list(parquet_dir.glob(parquet_pattern))
+
+            if existing_parquet:
+                print(f"   ⏭️ Parquet already exists: {existing_parquet[0].name}")
+                total_processed += 1
+                continue
+
+            try:
+                # Step 1: Extract CSV from ZIP
+                print("   📦 Extracting CSV from ZIP...")
+                csv_file = extractor.extract_single_zip(zip_file)
+
+                if not csv_file or not csv_file.exists():
+                    print(f"   ❌ Failed to extract CSV from {zip_file.name}")
+                    total_failed += 1
+                    continue
+
+                # Step 2: Verify CSV integrity
+                print("   🔍 Verifying CSV integrity...")
+                print("      - Timestamp format validation")
+                print("      - Data structure verification")
+                print("      - Content integrity check")
+
+                if not extractor.verify_csv_integrity(csv_file):
+                    print(f"   ❌ CSV integrity validation FAILED for {csv_file.name}")
+                    print("   🛑 STOPPING PIPELINE - Data integrity compromised")
+                    print(f"   📄 Problematic file: {csv_file}")
+
+                    # Log the critical error
+                    logging.error(f"CSV integrity validation failed for {csv_file.name} - PIPELINE STOPPED")
+
+                    # Signal error and stop
+                    print("\n" + "="*70)
+                    print(" ❌ PIPELINE STOPPED - INTEGRITY VALIDATION FAILED ")
+                    print("="*70)
+                    print(f"📄 Failed file: {csv_file.name}")
+                    print("🔧 Please check the data source and re-download if necessary")
+                    print("📦 ZIP file preserved for investigation")
+
+                    return False  # Signal failure to caller
+
+                print("   ✅ CSV integrity validation passed")
+
+                # Step 3: Convert to Parquet
+                print("   🔄 Converting CSV to Parquet...")
+                parquet_file = converter.convert_single_csv(csv_file)
+
+                if parquet_file and parquet_file.exists():
+                    print(f"   ✅ Converted to: {parquet_file.name}")
+
+                    # Step 4: Verify Parquet integrity
+                    print("   🔍 Verifying Parquet integrity...")
+                    if converter.verify_single_parquet(parquet_file):
+                        print("   ✅ Parquet integrity verified")
+
+                        # Step 5: Clean up CSV (keep ZIP as backup)
+                        try:
+                            csv_file.unlink()
+                            print("   🗑️ CSV file cleaned up")
+                        except Exception as e:
+                            print(f"   ⚠️ Could not delete CSV: {e}")
+
+                        total_converted += 1
+                    else:
+                        print(f"   ❌ Parquet integrity validation FAILED for {parquet_file.name}")
+                        print("   🛑 STOPPING PIPELINE - Parquet conversion error")
+
+                        # Log the critical error
+                        logging.error(f"Parquet integrity validation failed for {parquet_file.name} - PIPELINE STOPPED")
+
+                        return False  # Signal failure to caller
+                else:
+                    print(f"   ❌ Failed to convert CSV to Parquet")
+                    total_failed += 1
+                    continue
+
+                total_processed += 1
+
+            except Exception as e:
+                print(f"   ❌ Error processing {zip_file.name}: {e}")
+                logging.error(f"Error processing {zip_file.name}: {e}", exc_info=True)
+                total_failed += 1
+                continue
+
+        # Pipeline completion summary
+        print("\n" + "="*70)
+        print(" 🎉 Step 2 Pipeline Completed! ")
+        print("="*70)
+        print(f"\n📊 Processing Summary:")
+        print(f"   📦 ZIP files processed: {total_processed}/{len(zip_files)}")
+        print(f"   ✅ Successfully converted to Parquet: {total_converted}")
+        print(f"   ❌ Failed: {total_failed}")
+        print(f"   📁 Output directory: {parquet_dir}")
+
+        if total_failed > 0:
+            print(f"\n⚠️ {total_failed} files failed processing")
+            print("💡 Check logs for detailed error information")
+
+        print("\n🔄 Next Steps (run these commands separately):")
+        print("   3️⃣ Parquet optimization: python main.py")
+        print("   4️⃣ Data validation: python main.py")
+        print("   5️⃣ Feature generation: python main.py")
+        print("\n💡 Or use the interactive menu to continue with the next steps.")
+
+        logging.info(f"Step 2 completed: {total_converted} files converted, {total_failed} failed")
+        return True  # Signal success
+
+    except Exception as e:
+        print(f"\n❌ Pipeline failed: {e}")
+        logging.error(f"ZIP to Parquet pipeline failed: {e}", exc_info=True)
+        return False
+
+
+def run_csv_to_parquet_conversion_backup(config: PipelineConfig):
+    """BACKUP: Step 3 - Convert CSV to Parquet with verification and auto-cleanup"""
     print("\n" + "="*65)
-    print(" 🔄 Step 2: CSV → Parquet with Verification & Auto-Cleanup ")
+    print(" 🔄 BACKUP: CSV → Parquet with Verification & Auto-Cleanup ")
     print("="*65)
 
     # Create CSV to Parquet converter
@@ -1133,10 +1646,141 @@ def run_csv_to_parquet_conversion(config: PipelineConfig):
         print(f"\n❌ CSV to Parquet conversion failed: {e}")
 
 
+def run_parquet_validation_step(config: PipelineConfig):
+    """Step 3: Validate Parquet files integrity and completeness"""
+    print("\n" + "="*60)
+    print(" 🔍 Step 3: Validate Parquet Files Integrity ")
+    print("="*60)
+
+    # Log the start of operation
+    logging.info(f"Starting Step 3: Parquet Validation for {config.symbol} {config.data_type} {config.granularity}")
+
+    # Check if Parquet files exist
+    if config.data_type == "spot":
+        parquet_dir = Path("datasets") / f"dataset-raw-{config.granularity}-compressed" / "spot"
+    else:
+        parquet_dir = Path("datasets") / f"dataset-raw-{config.granularity}-compressed" / f"futures-{config.futures_type}"
+
+    if not parquet_dir.exists():
+        print(f"❌ Parquet directory not found: {parquet_dir}")
+        print("💡 Please run Step 2 first to create Parquet files")
+        return
+
+    parquet_files = list(parquet_dir.glob(f"{config.symbol}-Trades-*.parquet"))
+    if not parquet_files:
+        print(f"❌ No Parquet files found in {parquet_dir}")
+        print("💡 Please run Step 2 first to create Parquet files")
+        return
+
+    print(f"📄 Found {len(parquet_files)} Parquet files to validate")
+    print(f"📁 Source: {parquet_dir}")
+
+    print("\n💡 Validation Process:")
+    print("   🔍 Check file integrity and readability")
+    print("   📊 Verify data schema consistency")
+    print("   📈 Validate timestamp ranges and data completeness")
+    print("   🔢 Check row counts and data quality")
+
+    confirm = input("\n🚀 Proceed with Parquet validation? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ Parquet validation cancelled.")
+        return
+
+    try:
+        # Initialize converter for validation methods
+        from src.data_pipeline.converters.csv_to_parquet import CSVToParquetConverter
+
+        converter = CSVToParquetConverter(
+            symbol=config.symbol,
+            data_type=config.data_type,
+            futures_type=config.futures_type,
+            granularity=config.granularity
+        )
+
+        # Validate each Parquet file
+        valid_files = 0
+        invalid_files = 0
+        total_rows = 0
+
+        print(f"\n🔍 Validating {len(parquet_files)} Parquet files...")
+
+        for i, parquet_file in enumerate(sorted(parquet_files), 1):
+            print(f"\n📄 [{i}/{len(parquet_files)}] Validating: {parquet_file.name}")
+
+            try:
+                # Check file integrity and readability
+                print("   🔍 Checking file integrity...")
+                if converter.verify_single_parquet(parquet_file):
+                    print("   ✅ File integrity check passed")
+
+                    # Read file to get additional info
+                    import pandas as pd
+                    df = pd.read_parquet(parquet_file)
+
+                    file_rows = len(df)
+                    total_rows += file_rows
+
+                    print(f"   📊 Rows: {file_rows:,}")
+
+                    # Check basic schema
+                    expected_columns = ['trade_id', 'price', 'qty', 'quoteQty', 'time', 'isBuyerMaker', 'isBestMatch']
+                    missing_columns = [col for col in expected_columns if col not in df.columns]
+
+                    if missing_columns:
+                        print(f"   ⚠️ Missing columns: {missing_columns}")
+                    else:
+                        print("   ✅ Schema validation passed")
+
+                    # Check timestamp range
+                    if 'time' in df.columns:
+                        min_time = df['time'].min()
+                        max_time = df['time'].max()
+                        print(f"   📅 Time range: {min_time} to {max_time}")
+
+                    valid_files += 1
+
+                else:
+                    print("   ❌ File integrity check FAILED")
+                    invalid_files += 1
+
+            except Exception as e:
+                print(f"   ❌ Validation error: {e}")
+                invalid_files += 1
+
+        # Validation summary
+        print("\n" + "="*60)
+        print(" 🎉 Step 3 Validation Completed! ")
+        print("="*60)
+        print(f"\n📊 Validation Summary:")
+        print(f"   📄 Total files checked: {len(parquet_files)}")
+        print(f"   ✅ Valid files: {valid_files}")
+        print(f"   ❌ Invalid files: {invalid_files}")
+        print(f"   📈 Total rows: {total_rows:,}")
+        print(f"   📁 Directory: {parquet_dir}")
+
+        if invalid_files > 0:
+            print(f"\n⚠️ {invalid_files} files failed validation")
+            print("💡 Consider re-running Step 2 for failed files")
+            logging.warning(f"Parquet validation: {invalid_files} files failed")
+        else:
+            print("\n✅ All Parquet files passed validation!")
+            logging.info("All Parquet files passed validation")
+
+        print("\n🔄 Next Steps (run these commands separately):")
+        print("   4️⃣ Parquet optimization: python main.py")
+        print("   5️⃣ Data validation: python main.py")
+        print("   6️⃣ Feature generation: python main.py")
+        print("\n💡 Or use the interactive menu to continue with the next steps.")
+
+    except Exception as e:
+        print(f"\n❌ Parquet validation failed: {e}")
+        logging.error(f"Parquet validation failed: {e}", exc_info=True)
+
+
 def run_parquet_optimization(config: PipelineConfig):
-    """Step 3: Optimize Parquet files using robust optimizer with corruption prevention"""
+    """Step 4: Optimize Parquet files using robust optimizer with corruption prevention"""
     print("\n" + "="*50)
-    print(" 🔧 Step 3: Robust Parquet Optimization ")
+    print(" 🔧 Step 4: Robust Parquet Optimization ")
     print("="*50)
 
     # Determine source directory
@@ -1183,186 +1827,41 @@ def run_parquet_optimization(config: PipelineConfig):
 
 
 def run_data_validation(config: PipelineConfig):
-    """Step 4: Validate data integrity"""
+    """Step 5: Validate data integrity"""
     print("\n" + "="*50)
-    print(" ✅ Step 4: Validate Data Integrity ")
+    print(" ✅ Step 5: Validate Data Integrity ")
     print("="*50)
 
-    print("Choose validation type:")
-    print("1. Quick validation")
-    print("2. Advanced validation")
-    print("3. Missing dates validation")
-    print("4. 🛡️ Comprehensive integrity validation (recommended)")
+    # Directly run missing dates validation without menu
+    print("🔍 Running missing dates validation...")
 
-    choice = input("\nEnter your choice (1-4): ").strip()
-
-    if choice == "1":
-        print("🔍 Running quick validation...")
-        try:
-            quick_validate_main()
-            print("✅ Quick validation completed!")
-        except Exception as e:
-            print(f"❌ Validation failed: {e}")
-    elif choice == "2":
-        print("🔍 Running advanced validation...")
-        output_dir = input("Output directory (default: reports): ").strip() or "reports"
-
-        original_argv = sys.argv.copy()
-        sys.argv = ['validate', '--base-path', '.', '--output-dir', output_dir]
-
-        try:
-            advanced_validate_main()
-            print("✅ Advanced validation completed!")
-        except Exception as e:
-            print(f"❌ Validation failed: {e}")
-        finally:
-            sys.argv = original_argv
-    elif choice == "3":
-        print("🔍 Running missing dates validation...")
-
-        # Get data directory based on config - use optimized parquet files
-        if config.data_type == "spot":
-            data_dir = f"datasets/dataset-raw-{config.granularity}-compressed-optimized/spot"
-        else:
-            data_dir = f"datasets/dataset-raw-{config.granularity}-compressed-optimized/futures-{config.futures_type}"
-
-        # Ask if user wants to check daily gaps
-        check_daily = input("\nCheck for daily gaps within files? (slower) (y/n): ").strip().lower() == 'y'
-
-        original_argv = sys.argv.copy()
-        sys.argv = ['missing_dates_validator', '--data-dir', data_dir, '--symbol', config.symbol]
-        if check_daily:
-            sys.argv.append('--check-daily-gaps')
-
-        try:
-            missing_dates_main()
-            print("\n✅ Missing dates validation completed!")
-        except Exception as e:
-            print(f"❌ Validation failed: {e}")
-        finally:
-            sys.argv = original_argv
-    elif choice == "4":
-        print("🛡️ Running comprehensive integrity validation...")
-
-        # Get data directory based on config - use optimized parquet files
-        if config.data_type == "spot":
-            data_dir = f"datasets/dataset-raw-{config.granularity}-compressed-optimized/spot"
-        else:
-            data_dir = f"datasets/dataset-raw-{config.granularity}-compressed-optimized/futures-{config.futures_type}"
-
-        print(f"📁 Validating directory: {data_dir}")
-
-        # Options for comprehensive validation
-        max_workers_input = input("\nMax worker threads (default: 4): ").strip()
-        max_workers = int(max_workers_input) if max_workers_input.isdigit() else 4
-
-        save_report = input("Save detailed report to JSON? (y/n, default: y): ").strip().lower() != 'n'
-        report_path = None
-        if save_report:
-            report_path = f"reports/integrity_validation_{config.symbol}_{config.data_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-        try:
-            from pathlib import Path
-
-            print(f"\n🔍 Starting validation with {max_workers} worker threads...")
-            print("⏳ This may take a few minutes for large datasets...\n")
-
-            # Create validator with WARNING level to reduce console spam
-            validator = DataIntegrityValidator(log_level=logging.WARNING)
-            report = validator.validate_directory(Path(data_dir), max_workers)
-
-            # Print detailed results in terminal
-            print("\n" + "="*70)
-            print("🛡️  DATA INTEGRITY VALIDATION RESULTS")
-            print("="*70)
-
-            # Basic statistics
-            print(f"📁 Directory: {data_dir}")
-            print(f"⏰ Validation Time: {report.validation_time}")
-            print(f"📊 Files Processed: {report.total_files}")
-            print(f"✅ Valid Files: {report.valid_files}")
-            print(f"❌ Invalid Files: {report.invalid_files}")
-            print(f"📈 Total Rows: {report.total_rows:,}")
-            print(f"💾 Total Size: {report.total_size_gb:.2f} GB")
-            print(f"🎯 Data Quality Score: {report.data_quality_score:.1f}/100")
-
-            # File-by-file results
-            if hasattr(report, 'file_metrics') and report.file_metrics:
-                print(f"\n📋 File-by-File Analysis:")
-                print(f"{'File':<40} {'Size(MB)':<10} {'Rows':<12} {'Status':<10} {'Issues'}")
-                print("-" * 85)
-
-                for metrics in report.file_metrics:
-                    filename = Path(metrics.file_path).name
-                    size_mb = metrics.file_size_mb
-                    rows = metrics.rows
-                    status = "✅ Valid" if metrics.is_valid else "❌ Invalid"
-                    issues = len(metrics.errors) + len(metrics.warnings)
-
-                    print(f"{filename:<40} {size_mb:<10.1f} {rows:<12,} {status:<10} {issues}")
-
-            # Show errors if any
-            if report.invalid_files > 0:
-                print(f"\n❌ Critical Issues Found:")
-                for i, error in enumerate(report.critical_errors[:10], 1):
-                    print(f"  {i}. {error}")
-                if len(report.critical_errors) > 10:
-                    print(f"  ... and {len(report.critical_errors) - 10} more errors")
-
-            # Show warnings if any
-            if hasattr(report, 'warnings') and report.warnings:
-                print(f"\n⚠️  Warnings ({len(report.warnings)}):")
-                for i, warning in enumerate(report.warnings[:5], 1):
-                    print(f"  {i}. {warning}")
-                if len(report.warnings) > 5:
-                    print(f"  ... and {len(report.warnings) - 5} more warnings")
-
-            # Summary statistics
-            if hasattr(report, 'summary_stats') and report.summary_stats:
-                print(f"\n📈 Summary Statistics:")
-                for key, value in report.summary_stats.items():
-                    if isinstance(value, float):
-                        print(f"  📊 {key}: {value:.2f}")
-                    else:
-                        print(f"  📊 {key}: {value:,}")
-
-            # Overall assessment
-            print(f"\n🎯 Overall Assessment:")
-            if report.data_quality_score >= 95:
-                print("   ✅ EXCELLENT - Data quality is outstanding!")
-            elif report.data_quality_score >= 80:
-                print("   ✅ GOOD - Data quality meets standards")
-            elif report.data_quality_score >= 60:
-                print("   ⚠️  ACCEPTABLE - Some issues detected but usable")
-            else:
-                print("   ❌ POOR - Significant data quality issues require attention")
-
-            print("="*70)
-
-            # Save report if requested
-            if save_report and report_path:
-                Path("reports").mkdir(exist_ok=True)
-                validator.save_report(report, Path(report_path))
-                print(f"\n📄 Detailed JSON report saved to: {report_path}")
-
-            if report.invalid_files == 0:
-                print("\n🎉 Comprehensive validation completed successfully!")
-            else:
-                print(f"\n⚠️  Validation completed with {report.invalid_files} invalid files")
-                print("💡 Review the issues above and consider data cleanup")
-
-        except Exception as e:
-            print(f"❌ Comprehensive validation failed: {e}")
-            import traceback
-            print(f"🔍 Details: {traceback.format_exc()}")
+    # Get data directory based on config - use optimized parquet files
+    if config.data_type == "spot":
+        data_dir = f"datasets/dataset-raw-{config.granularity}-compressed-optimized/spot"
     else:
-        print("❌ Invalid choice.")
+        data_dir = f"datasets/dataset-raw-{config.granularity}-compressed-optimized/futures-{config.futures_type}"
+
+    # Ask if user wants to check daily gaps
+    check_daily = input("\nCheck for daily gaps within files? (slower) (y/n): ").strip().lower() == 'y'
+
+    original_argv = sys.argv.copy()
+    sys.argv = ['missing_dates_validator', '--data-dir', data_dir, '--symbol', config.symbol]
+    if check_daily:
+        sys.argv.append('--check-daily-gaps')
+
+    try:
+        missing_dates_main()
+        print("\n✅ Missing dates validation completed!")
+    except Exception as e:
+        print(f"❌ Validation failed: {e}")
+    finally:
+        sys.argv = original_argv
 
 
 def run_feature_generation(config: PipelineConfig):
-    """Step 5: Generate features"""
+    """Step 6: Generate features"""
     print("\n" + "="*50)
-    print(" 📊 Step 5: Generate Features ")
+    print(" 📊 Step 6: Generate Features ")
     print("="*50)
 
     print("Available features:")
@@ -1386,6 +1885,60 @@ def run_feature_generation(config: PipelineConfig):
         print("❌ Invalid choice.")
 
 
+def run_reoptimize_parquet_streaming(config: PipelineConfig):
+    """Re-optimize existing parquet files to reach 10GB target using streaming"""
+    print("\n" + "="*60)
+    print(" 🔧 Re-optimize Parquet Files (Streaming) ")
+    print("="*60)
+
+    # Determine market type based on config
+    if config.data_type == "spot":
+        market_type = "spot"
+    else:
+        market_type = f"futures-{config.futures_type}"
+
+    # Set data directory path
+    base_dir = Path("datasets")
+    data_dir = base_dir / f"dataset-raw-{config.granularity}-compressed-optimized" / market_type
+
+    if not data_dir.exists():
+        print(f"❌ Optimized directory not found: {data_dir}")
+        print("💡 Please run the optimization step first (option 3)")
+        input("\nPress Enter to continue...")
+        return
+
+    print(f"📁 Directory: {data_dir}")
+    print(f"📊 Symbol: {config.symbol}")
+    print(f"📈 Market: {config.data_type} ({config.futures_type if config.data_type == 'futures' else 'spot'})")
+    print(f"📅 Granularity: {config.granularity}")
+
+    print("\n🔧 This tool will:")
+    print("   • Re-optimize existing parquet files to reach the 10GB target size")
+    print("   • Use memory-efficient streaming to handle large files")
+    print("   • Create a backup before making any changes")
+    print("   • Merge small files into larger ones (up to 10GB each)")
+
+    # Get target size
+    target_input = input("\nTarget file size in GB (default: 10): ").strip()
+    target_size = float(target_input) if target_input else 10.0
+
+    # Ask for dry run
+    dry_run = input("\nDry run? (yes/no, default: no): ").strip().lower() == 'yes'
+
+    try:
+        # Call the reoptimize function directly
+        reoptimize_directory_streaming(data_dir, target_size, dry_run)
+        print("\n✅ Re-optimization completed successfully!")
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Operation cancelled by user")
+    except Exception as e:
+        print(f"\n❌ Re-optimization failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    input("\nPress Enter to continue...")
+
+
 def interactive_main():
     """Main interactive menu with new flow"""
     # Setup logging
@@ -1402,27 +1955,31 @@ def interactive_main():
     while True:
         display_pipeline_menu(config)
 
-        choice = input("\nEnter your choice (1-8): ").strip()
+        choice = input("\nEnter your choice (1-10): ").strip()
 
         if choice == "1":
-            run_download_and_extract(config)
+            run_download_only(config)
         elif choice == "2":
-            run_csv_to_parquet_conversion(config)
+            run_zip_to_parquet_pipeline(config)
         elif choice == "3":
-            run_parquet_optimization(config)
+            run_parquet_validation_step(config)
         elif choice == "4":
-            run_data_validation(config)
+            run_parquet_optimization(config)
         elif choice == "5":
-            run_feature_generation(config)
+            run_data_validation(config)
         elif choice == "6":
-            clean_zip_and_checksum_files(config)
+            run_feature_generation(config)
         elif choice == "7":
-            add_missing_daily_data(config)
+            clean_zip_and_checksum_files(config)
         elif choice == "8":
+            add_missing_daily_data(config)
+        elif choice == "9":
+            run_reoptimize_parquet_streaming(config)
+        elif choice == "10":
             print("\n👋 Goodbye!")
             break
         else:
-            print("❌ Invalid choice. Please enter 1-8.")
+            print("❌ Invalid choice. Please enter 1-10.")
 
 
 def main():
@@ -1440,7 +1997,7 @@ Examples:
   # Direct command mode
   python main.py download --start 2024-01-01 --end 2024-01-31
   python main.py optimize --source data/raw --target data/optimized
-  python main.py validate --quick
+  python main.py validate --data-dir datasets/dataset-raw-daily-compressed-optimized/spot --symbol BTCUSDT
   python main.py features --type imbalance
         """
     )
@@ -1472,13 +2029,8 @@ Examples:
     optimize_parser.add_argument('--max-size', type=int, default=10, help='Maximum file size in GB')
     optimize_parser.add_argument('--auto-confirm', action='store_true', help='Auto confirm operations')
 
-    # Validate command
-    validate_parser = subparsers.add_parser('validate', help='Validate data integrity')
-    validate_parser.add_argument('--quick', action='store_true', help='Run quick validation')
-    validate_parser.add_argument('--advanced', action='store_true', help='Run advanced validation')
-    validate_parser.add_argument('--missing-dates', action='store_true', help='Check for missing dates')
-    validate_parser.add_argument('--output-dir', default='reports', help='Output directory for reports')
-    validate_parser.add_argument('--base-path', default='.', help='Base path for data')
+    # Validate command (missing dates validation only)
+    validate_parser = subparsers.add_parser('validate', help='Validate missing dates in data')
     validate_parser.add_argument('--data-dir', help='Data directory for missing dates check')
     validate_parser.add_argument('--symbol', default='BTCUSDT', help='Symbol for missing dates check')
     validate_parser.add_argument('--check-daily-gaps', action='store_true', help='Check daily gaps in missing dates validation')
@@ -1553,23 +2105,14 @@ Examples:
             sys.argv.append('--auto-confirm')
         optimize_main()
     elif args.command == 'validate':
-        if args.quick:
-            quick_validate_main()
-        elif args.advanced:
-            sys.argv = ['validate', '--base-path', args.base_path,
-                       '--output-dir', args.output_dir]
-            advanced_validate_main()
-        elif args.missing_dates:
-            if not args.data_dir:
-                print("Please specify --data-dir for missing dates validation")
-                return
-            sys.argv = ['missing_dates_validator', '--data-dir', args.data_dir,
-                       '--symbol', args.symbol]
-            if args.check_daily_gaps:
-                sys.argv.append('--check-daily-gaps')
-            missing_dates_main()
-        else:
-            print("Please specify --quick, --advanced, or --missing-dates for validation")
+        if not args.data_dir:
+            print("Please specify --data-dir for missing dates validation")
+            return
+        sys.argv = ['missing_dates_validator', '--data-dir', args.data_dir,
+                   '--symbol', args.symbol]
+        if args.check_daily_gaps:
+            sys.argv.append('--check-daily-gaps')
+        missing_dates_main()
     elif args.command == 'features':
         if args.type == 'imbalance':
             imbalance_main()

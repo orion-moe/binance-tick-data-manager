@@ -22,11 +22,7 @@ class MissingDatesValidator:
         self.pattern = f"{symbol}-Trades-(\\d{{4}})-(\\d{{2}})\\.parquet"
         self.optimized_pattern = f"{symbol}-Trades-Optimized-\\d{{3}}\\.parquet"
         
-        # Setup logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
+        # Get logger (logging should be configured by main.py)
         self.logger = logging.getLogger(__name__)
     
     def extract_date_from_filename(self, filename: str) -> Optional[Tuple[int, int]]:

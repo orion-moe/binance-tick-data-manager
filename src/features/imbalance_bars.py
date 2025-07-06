@@ -16,13 +16,13 @@ from dask.distributed import Client
 from numba import njit, types
 from numba.typed import List
 
-# Configuração do logging
-logging.basicConfig(level=logging.INFO)
+# Setup logging
+logger = logging.getLogger(__name__)
 
 def setup_dask_client(n_workers=10, threads_per_worker=1, memory_limit='6.4GB'):
     """Setup Dask distributed client"""
     client = Client(n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
-    logging.info(client)
+    logger.info(client)
     return client
 
 def read_parquet_files_optimized(raw_dataset_path, file):
@@ -242,7 +242,7 @@ def batch_create_imbalance_dollar_bars_optimized(df_dask, init_T, init_dif, res_
     results = []
     params_save = []
     for partition in range(df_dask.npartitions):
-        logging.info(f'Processando partição {partition+1} de {df_dask.npartitions}')
+        logger.info(f'Processando partição {partition+1} de {df_dask.npartitions}')
         part = df_dask.get_partition(partition).compute()
 
         bars, init_T, init_dif, res_init, params = create_imbalance_dollar_bars_numba(
@@ -307,15 +307,15 @@ def process_imbalance_bars(raw_dataset_path, output_path, initial_state, timesta
             init_dif = 1.0
             res_init = (-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0)
             init_T = init_T0
-            logging.info(f"params_{output_file}")
+            logger.info(f"params_{output_file}")
 
         number_str = str(number).zfill(3)
         file = f'BTCUSDT-Trades-Optimized-{number_str}.parquet'
 
-        logging.info(f"Dask n{number_str} de {file_count-1}")
+        logger.info(f"Dask n{number_str} de {file_count-1}")
 
         if not os.path.exists(os.path.join(raw_dataset_path, file)):
-            logging.warning(f"Arquivo {file} não encontrado. Pulando para o próximo.")
+            logger.warning(f"Arquivo {file} não encontrado. Pulando para o próximo.")
             continue
 
         df_dask = read_parquet_files_optimized(raw_dataset_path, file)
@@ -367,7 +367,7 @@ def process_imbalance_bars(raw_dataset_path, output_path, initial_state, timesta
             elapsed_time = end_time - start_time
             elapsed_time_minutes = elapsed_time / 60
             processing_times[file] = elapsed_time_minutes
-            logging.info(f"Tempo de processamento para {file}: {elapsed_time_minutes:.2f} minutos")
+            logger.info(f"Tempo de processamento para {file}: {elapsed_time_minutes:.2f} minutos")
     
     return processing_times
 
@@ -392,8 +392,8 @@ def main():
         # Process imbalance bars
         processing_times = process_imbalance_bars(raw_dataset_path, output_base_path, initial_state, timestamp)
         
-        logging.info("Processing completed successfully!")
-        logging.info(f"Processing times: {processing_times}")
+        logger.info("Processing completed successfully!")
+        logger.info(f"Processing times: {processing_times}")
         
     finally:
         # Close Dask client

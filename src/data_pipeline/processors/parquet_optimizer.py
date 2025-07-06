@@ -29,15 +29,6 @@ class EnhancedParquetOptimizer:
         self.target_dir.mkdir(parents=True, exist_ok=True)
         
         # Setup logging
-        log_file = Path(".") / "optimize_parquet_enhanced.log"
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(str(log_file)),
-                logging.StreamHandler()
-            ]
-        )
         self.logger = logging.getLogger(__name__)
     
     def get_parquet_info(self, file_path: Path) -> dict:
@@ -215,7 +206,19 @@ class EnhancedParquetOptimizer:
                 file_size = file_info['size']
                 
                 # Check if we need a new output file
-                if current_writer is None or (current_size + file_size > self.max_size_bytes):
+                # Note: We need to check the actual size on disk, not the input file size
+                # because compression and schema changes affect the final size
+                if current_writer is not None and current_output_path.exists():
+                    # Get actual current size from disk
+                    actual_current_size = current_output_path.stat().st_size
+                else:
+                    actual_current_size = current_size
+                
+                # Estimate size after adding this table (conservative estimate)
+                # The input file size is not a good predictor due to recompression
+                estimated_addition = file_size * 0.9  # Assume similar compression ratio
+                
+                if current_writer is None or (actual_current_size + estimated_addition > self.max_size_bytes * 0.95):
                     # Close current writer if exists
                     if current_writer:
                         current_writer.close()
@@ -239,7 +242,9 @@ class EnhancedParquetOptimizer:
                 
                 # Write table to current file
                 current_writer.write_table(table)
-                current_size += file_size
+                # Track approximate size (writers buffer data, so disk size isn't accurate until close)
+                # Use a more accurate estimate based on the compression ratio observed
+                current_size += file_size * 0.85  # Typical compression ratio for this data
                 processed_files.append(file_info['path'])
             
             # Close final writer

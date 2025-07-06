@@ -127,14 +127,6 @@ class BinanceDataDownloader:
         log_filename = f'download_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
         log_path = logs_dir / log_filename
 
-        logging.basicConfig(
-            level=logging.INFO,
-            format=log_format,
-            handlers=[
-                logging.FileHandler(str(log_path)),
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
         self.logger = logging.getLogger(__name__)
 
     def load_progress(self) -> Dict:
