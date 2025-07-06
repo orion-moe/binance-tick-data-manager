@@ -120,8 +120,27 @@ class CSVExtractor:
             import pandas as pd
             COLUMN_NAMES = ['trade_id', 'price', 'qty', 'quoteQty', 'time', 'isBuyerMaker', 'isBestMatch']
             
-            # Read first and last timestamps
-            df_head = pd.read_csv(csv_path, names=COLUMN_NAMES, header=None, nrows=1)
+            # Check if file has header
+            with open(csv_path, 'r') as f:
+                first_line = f.readline().strip()
+            has_header = any(keyword in first_line.lower() for keyword in ['time', 'price', 'qty', 'id'])
+            
+            # Read first timestamp
+            if has_header:
+                df_head = pd.read_csv(csv_path, nrows=1)
+                # Rename columns if needed
+                column_mapping = {
+                    'id': 'trade_id',
+                    'price': 'price',
+                    'qty': 'qty',
+                    'quote_qty': 'quoteQty',
+                    'time': 'time',
+                    'is_buyer_maker': 'isBuyerMaker',
+                    'is_best_match': 'isBestMatch'
+                }
+                df_head.rename(columns=column_mapping, inplace=True)
+            else:
+                df_head = pd.read_csv(csv_path, names=COLUMN_NAMES, header=None, nrows=1)
             
             # Read last row efficiently
             with open(csv_path, 'rb') as f:
@@ -135,7 +154,10 @@ class CSVExtractor:
                 
             # Parse last row
             import io
-            df_tail = pd.read_csv(io.StringIO(last_line), names=COLUMN_NAMES, header=None)
+            if has_header:
+                df_tail = pd.read_csv(io.StringIO(last_line), names=list(df_head.columns), header=None)
+            else:
+                df_tail = pd.read_csv(io.StringIO(last_line), names=COLUMN_NAMES, header=None)
             
             # Convert timestamps
             first_time = df_head['time'].iloc[0]
@@ -295,7 +317,26 @@ class CSVExtractor:
                             
                             for f_info in file_info:
                                 try:
-                                    df = pd.read_csv(f_info['full_path'], names=COLUMN_NAMES, header=None)
+                                    # Check if file has header
+                                    with open(f_info['full_path'], 'r') as f:
+                                        first_line = f.readline().strip()
+                                    has_header_merge = any(keyword in first_line.lower() for keyword in ['time', 'price', 'qty', 'id'])
+                                    
+                                    if has_header_merge:
+                                        df = pd.read_csv(f_info['full_path'])
+                                        # Rename columns to match expected names
+                                        column_mapping = {
+                                            'id': 'trade_id',
+                                            'price': 'price', 
+                                            'qty': 'qty',
+                                            'quote_qty': 'quoteQty',
+                                            'time': 'time',
+                                            'is_buyer_maker': 'isBuyerMaker',
+                                            'is_best_match': 'isBestMatch'
+                                        }
+                                        df.rename(columns=column_mapping, inplace=True)
+                                    else:
+                                        df = pd.read_csv(f_info['full_path'], names=COLUMN_NAMES, header=None)
                                     all_dfs.append(df)
                                     self.logger.info(f"  ✅ Read {len(df):,} rows from {f_info['path']}")
                                 except Exception as e:
@@ -412,10 +453,39 @@ class CSVExtractor:
             
             COLUMN_NAMES = ['trade_id', 'price', 'qty', 'quoteQty', 'time', 'isBuyerMaker', 'isBestMatch']
             
+            # Initialize has_header variable
+            has_header = False
+            
             # Try reading the CSV
             try:
-                # Try without header first (Binance format)
-                df_head = pd.read_csv(csv_path, names=COLUMN_NAMES, header=None, nrows=10000)
+                # First, check if the file has a header by reading the first line
+                with open(csv_path, 'r') as f:
+                    first_line = f.readline().strip()
+                
+                # Check if first line contains header keywords
+                has_header = any(keyword in first_line.lower() for keyword in ['time', 'price', 'qty', 'id'])
+                
+                if has_header:
+                    # Read with header
+                    df_head = pd.read_csv(csv_path, nrows=10000)
+                    # Rename columns to match expected names if needed
+                    column_mapping = {
+                        'id': 'trade_id',
+                        'price': 'price',
+                        'qty': 'qty',
+                        'quote_qty': 'quoteQty',
+                        'time': 'time',
+                        'is_buyer_maker': 'isBuyerMaker',
+                        'is_best_match': 'isBestMatch'
+                    }
+                    df_head.rename(columns=column_mapping, inplace=True)
+                    
+                    # Add missing columns with default values if they don't exist
+                    if 'isBestMatch' not in df_head.columns:
+                        df_head['isBestMatch'] = True
+                else:
+                    # Try without header (original Binance format)
+                    df_head = pd.read_csv(csv_path, names=COLUMN_NAMES, header=None, nrows=10000)
                 
                 # Also read the last rows to get accurate time range
                 # Count total lines first (excluding potential header)
@@ -437,8 +507,13 @@ class CSVExtractor:
                 # Parse tail data
                 import io
                 try:
-                    df_tail = pd.read_csv(io.StringIO('\n'.join(tail_lines)), 
-                                         names=COLUMN_NAMES, header=None)
+                    if has_header:
+                        # Parse with awareness that these are data rows, not header
+                        df_tail = pd.read_csv(io.StringIO('\n'.join(tail_lines)), 
+                                             names=list(df_head.columns), header=None)
+                    else:
+                        df_tail = pd.read_csv(io.StringIO('\n'.join(tail_lines)), 
+                                             names=COLUMN_NAMES, header=None)
                 except:
                     # If tail parsing fails, use head data
                     df_tail = df_head

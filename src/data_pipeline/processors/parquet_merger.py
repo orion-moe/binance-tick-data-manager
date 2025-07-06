@@ -156,14 +156,20 @@ class ParquetMerger:
             # Find the next available number
             existing_files = sorted(optimized_dir.glob(f"{self.symbol}-Trades-Optimized-*.parquet"))
             if existing_files:
-                last_number = int(existing_files[-1].stem.split('-')[-1])
+                # Extract number from filename like BTCUSDT-Trades-Optimized-012.parquet
+                last_filename = existing_files[-1].stem  # e.g., 'BTCUSDT-Trades-Optimized-012'
+                last_number_str = last_filename.split('-')[-1]  # '012'
+                last_number = int(last_number_str)
                 file_number = last_number + 1
+                logger.info(f"Found {len(existing_files)} existing optimized files, last number: {last_number}")
             else:
                 file_number = 1
+                logger.info("No existing optimized files found, starting with 001")
                 
         output_path = optimized_dir / f"{self.symbol}-Trades-Optimized-{file_number:03d}.parquet"
         
         # Write data
+        logger.info(f"Writing {len(data)} rows to {output_path}")
         table = pa.Table.from_pandas(data)
         pq.write_table(table, output_path, compression='snappy')
         logger.success(f"Created new optimized file: {output_path.name} with {len(data)} rows")

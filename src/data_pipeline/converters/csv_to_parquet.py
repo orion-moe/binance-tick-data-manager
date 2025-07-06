@@ -154,20 +154,70 @@ class CSVToParquetConverter:
             chunks = []
             chunk_size = 5_000_000  # 5M rows per chunk
             
-            for chunk_idx, chunk in enumerate(pd.read_csv(
-                csv_file,
-                names=None if has_header else COLUMN_NAMES,
-                header=0 if has_header else None,
-                chunksize=chunk_size,
-                dtype={
-                    'trade_id': 'int64',
+            # Check how many columns the CSV has
+            with open(csv_file, 'r') as f:
+                first_line = f.readline().strip()
+                num_columns = len(first_line.split(','))
+            
+            # Define dtype based on whether we have headers
+            column_names = COLUMN_NAMES  # Default
+            if has_header:
+                # For CSV with headers, we need to use the actual column names
+                dtype_spec = {
+                    'id': 'int64',
                     'price': 'float32',
                     'qty': 'float32',
-                    'quoteQty': 'float32',
-                    'isBuyerMaker': 'bool',
-                    'isBestMatch': 'bool'
+                    'quote_qty': 'float32',
+                    'is_buyer_maker': 'bool'
                 }
+            else:
+                # For CSV without headers, use the expected column names
+                # But only for columns that exist
+                if num_columns == 7:
+                    dtype_spec = {
+                        'trade_id': 'int64',
+                        'price': 'float32',
+                        'qty': 'float32',
+                        'quoteQty': 'float32',
+                        'isBuyerMaker': 'bool',
+                        'isBestMatch': 'bool'
+                    }
+                    column_names = COLUMN_NAMES
+                else:
+                    # Files with 6 columns don't have isBestMatch
+                    dtype_spec = {
+                        'trade_id': 'int64',
+                        'price': 'float32',
+                        'qty': 'float32',
+                        'quoteQty': 'float32',
+                        'isBuyerMaker': 'bool'
+                    }
+                    column_names = COLUMN_NAMES[:-1]  # Exclude last column
+            
+            for chunk_idx, chunk in enumerate(pd.read_csv(
+                csv_file,
+                names=None if has_header else (column_names if not has_header else COLUMN_NAMES),
+                header=0 if has_header else None,
+                chunksize=chunk_size,
+                dtype=dtype_spec
             )):
+                # Rename columns to standard names if we have headers
+                if has_header:
+                    column_mapping = {
+                        'id': 'trade_id',
+                        'quote_qty': 'quoteQty',
+                        'is_buyer_maker': 'isBuyerMaker'
+                    }
+                    chunk = chunk.rename(columns=column_mapping)
+                    
+                    # Add missing columns with default values
+                    if 'isBestMatch' not in chunk.columns:
+                        chunk['isBestMatch'] = True  # Default value
+                else:
+                    # For files without headers, also check if isBestMatch is missing
+                    if 'isBestMatch' not in chunk.columns:
+                        chunk['isBestMatch'] = True  # Default value
+                
                 # Convert time column
                 if 'time' in chunk.columns:
                     # Try different time formats
