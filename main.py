@@ -1740,10 +1740,13 @@ def run_feature_generation(config: PipelineConfig):
         print(f"   Symbol: {config.symbol}")
         print(f"   Data Type: {config.data_type}")
         print(f"   Granularity: {config.granularity}")
-        print("\n⚠️  Note: Feature generation currently uses hardcoded parameters.")
-        print("   Future versions will use the configuration above.")
         try:
-            imbalance_main()
+            imbalance_main(
+                symbol=config.symbol,
+                data_type=config.data_type,
+                futures_type=config.futures_type if config.data_type == 'futures' else 'um',
+                granularity=config.granularity
+            )
             print("✅ Feature generation completed!")
         except Exception as e:
             print(f"❌ Feature generation failed: {e}")
