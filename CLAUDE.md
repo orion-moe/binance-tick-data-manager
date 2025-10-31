@@ -20,17 +20,21 @@ python main.py features --type imbalance
 ```bash
 # Install dependencies
 pip install -r requirements.txt
+
+# Core dependencies: arcticdb, pandas, pyarrow
 ```
 
 ### Jupyter Notebooks
 ```bash
 # Run Jupyter notebooks
 jupyter notebook
+
+# Available notebook: global_analysis.ipynb
 ```
 
 ## Architecture
 
-This is a Bitcoin/cryptocurrency data pipeline for machine learning finance applications. The system follows a modular ETL architecture:
+This is a Bitcoin/cryptocurrency data pipeline for machine learning finance applications. The system follows a modular ETL architecture with integrity-first design principles.
 
 ### Data Flow
 1. **Download** → Binance historical data (ZIP files with checksums)
@@ -42,13 +46,19 @@ This is a Bitcoin/cryptocurrency data pipeline for machine learning finance appl
 
 ### Key Components
 - **main.py**: Central orchestrator with interactive CLI and command-line interface
-- **src/data_pipeline/**: Core ETL modules (downloaders, extractors, converters, processors, validators)
-- **src/features/**: Feature engineering modules (imbalance_bars.py)
+- **src/data_pipeline/**: Core ETL modules
+  - **downloaders/binance_downloader.py**: Downloads from Binance with checksum verification
+  - **extractors/csv_extractor.py**: ZIP extraction and CSV validation
+  - **converters/csv_to_parquet.py**: CSV to Parquet conversion with auto-cleanup
+  - **processors/parquet_optimizer.py**: Merges and optimizes Parquet files
+  - **processors/parquet_merger.py**: Merges daily updates into optimized files
+  - **validators/missing_dates_validator.py**: Validates data completeness
+- **src/features/imbalance_bars.py**: Generates imbalance dollar bars using Dask distributed computing
 - **datasets/**: Data storage with progress tracking (JSON files)
 - **output/**: Generated features and processed data
 
 ### Design Principles
-- **Integrity First**: Every step includes validation
+- **Integrity First**: Every step includes validation and checksum verification
 - **Resume Capability**: Progress tracking allows resuming interrupted operations
 - **Memory Efficient**: Uses Dask for distributed processing of large datasets
 - **Performance Optimized**: Numba JIT compilation for compute-intensive operations
@@ -60,7 +70,7 @@ This is a Bitcoin/cryptocurrency data pipeline for machine learning finance appl
 - Formats: ZIP → CSV → Parquet → Optimized Parquet
 
 ### Progress Tracking
-Progress is saved in JSON files (e.g., `spot_progress_BTCUSDT.json`) allowing operations to resume from interruption points.
+Progress is saved in JSON files (e.g., `download_progress_BTCUSDT_spot_daily.json`) allowing operations to resume from interruption points.
 
 ### Important Patterns
 - Use interactive mode for exploring options
@@ -68,3 +78,9 @@ Progress is saved in JSON files (e.g., `spot_progress_BTCUSDT.json`) allowing op
 - Check logs in `datasets/logs/` for detailed processing information
 - Parquet files are auto-cleaned after successful conversion
 - Missing dates validator can check both file-level and daily gaps
+- Daily data updates are merged into existing optimized files
+
+### Special Features
+- **Add Missing Daily Data**: Automatically detects and downloads missing recent data (menu option 7)
+- **ZIP Cleanup**: Removes ZIP and CHECKSUM files to free disk space (menu option 6)
+- **Integrity-First Pipeline**: Step 2 validates data at every stage, stopping on corruption

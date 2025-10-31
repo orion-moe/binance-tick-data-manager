@@ -1,0 +1,3 @@
+arcticdb
+pandas
+pyarrow

@@ -27,7 +27,16 @@ def setup_dask_client(n_workers=10, threads_per_worker=1, memory_limit='6.4GB'):
     return client
 
 def read_parquet_files_optimized(raw_dataset_path, file):
-    """Lê arquivos Parquet de forma otimizada."""
+    """
+    Read Parquet files in an optimized manner using Dask.
+
+    Args:
+        raw_dataset_path: Path to the raw dataset directory
+        file: Name of the Parquet file to read
+
+    Returns:
+        Dask DataFrame with selected columns and optimized dtypes
+    """
     parquet_pattern = os.path.join(raw_dataset_path, file)
     df_dask = dd.read_parquet(
         parquet_pattern,
@@ -38,19 +47,41 @@ def read_parquet_files_optimized(raw_dataset_path, file):
     return df_dask
 
 def assign_side_optimized(df):
-    """Atribui o lado da negociação com base na mudança de preço."""
+    """
+    Assign trade side based on price movement using tick rule.
+
+    The tick rule assigns:
+    - 1 (buy) if current price > previous price
+    - -1 (sell) if current price < previous price
+    - Forward fill for equal prices
+
+    Args:
+        df: Pandas DataFrame with price data
+
+    Returns:
+        DataFrame with 'side' column added
+    """
     df['side'] = np.where(df['price'].shift() > df['price'], 1,
                           np.where(df['price'].shift() < df['price'], -1, np.nan))
     df['side'] = df['side'].ffill().fillna(1).astype('int8')
     return df
 
 def apply_operations_optimized(df_dask, meta):
-    """Aplica operações otimizadas no DataFrame."""
+    """
+    Apply optimized operations to calculate dollar imbalance.
+
+    Args:
+        df_dask: Dask DataFrame with trade data
+        meta: DataFrame metadata for Dask operations
+
+    Returns:
+        Dask DataFrame with side and dollar_imbalance columns
+    """
     df_dask = df_dask.map_partitions(assign_side_optimized, meta=meta)
     df_dask['dollar_imbalance'] = df_dask['quoteQty'] * df_dask['side']
     return df_dask
 
-# Função compilada com numba
+# Numba-compiled function for high-performance processing
 @njit(
     types.Tuple((
         types.ListType(types.Tuple((
@@ -112,7 +143,32 @@ def process_partition_imbalance_numba(
     prices, times, imbalances, sides, qtys,
     init_T, init_dif, alpha_volume, alpha_imbalance, res_init
 ):
-    """Processa uma partição usando numba para aceleração."""
+    """
+    Process a data partition using Numba JIT compilation for high performance.
+
+    This function implements the Imbalance Dollar Bars algorithm based on
+    Lopez de Prado's Advances in Financial Machine Learning methodology.
+
+    Args:
+        prices: Array of trade prices
+        times: Array of timestamps
+        imbalances: Array of dollar imbalances (quoteQty * side)
+        sides: Array of trade sides (1 for buy, -1 for sell)
+        qtys: Array of trade quantities
+        init_T: Initial exponential weighted moving average of volume
+        init_dif: Initial exponential weighted moving average of imbalance
+        alpha_volume: EWMA decay factor for volume
+        alpha_imbalance: EWMA decay factor for imbalance
+        res_init: Initial state tuple containing bar aggregation values
+
+    Returns:
+        Tuple containing:
+        - bars: List of completed imbalance bars
+        - exp_T: Updated EWMA of volume
+        - exp_dif: Updated EWMA of imbalance
+        - final_state: State for next partition
+        - params: List of parameter evolution
+    """
     exp_T = init_T
     exp_dif = init_dif
     threshold = exp_T * abs(exp_dif)
