@@ -269,7 +269,7 @@ def display_pipeline_menu(config: PipelineConfig):
     print(f"2. {'✅' if status['parquet_converted'] else '⬜'}🔄 ZIP → CSV → Parquet Pipeline (Integrity-First)")
     print(f"3. {'✅' if status['parquet_optimized'] else '⬜'}🔧 Optimize Parquet files")
     print(f"4. {'✅' if status['data_validated'] else '⬜'}📅 Validate missing dates (recommended)")
-    print(f"5. {'✅' if status['features_generated'] else '⬜'}📊 Generate bars")
+    print(f"5. {'✅' if status['features_generated'] else '⬜'}📊 Generate features")
     print("6. 🗑️  Clean ZIP and CHECKSUM files")
     print("7. 📅 Add missing daily data")
     print("8. 🚪 Exit")
@@ -700,8 +700,8 @@ def add_missing_daily_data(config: PipelineConfig):
                     if len(new_daily_files) > 5:
                         print(f"     ... and {len(new_daily_files) - 5} more files")
 
-                    # Import the merger (using memory-optimized version)
-                    from src.data_pipeline.processors.parquet_merger_fixed import ParquetMerger
+                    # Import the merger
+                    from src.data_pipeline.processors.parquet_merger import ParquetMerger
 
                     # Initialize merger
                     merger = ParquetMerger(symbol=config.symbol)
@@ -749,10 +749,6 @@ def add_missing_daily_data(config: PipelineConfig):
         else:
             # Not monthly granularity, no merge needed
             merge_successful = True
-
-        # Force garbage collection to free memory after merge
-        import gc
-        gc.collect()
 
         # Clean up ZIP files automatically (parquet files are deleted during merge)
         print("\n🗑️  Automatically cleaning up temporary ZIP files...")
@@ -1729,135 +1725,33 @@ def run_data_validation(config: PipelineConfig):
 
 
 def run_feature_generation(config: PipelineConfig):
-    """Step 5: Generate bars"""
+    """Step 6: Generate features"""
     print("\n" + "="*50)
-    print(" 📊 Step 5: Generate Bars ")
+    print(" 📊 Step 6: Generate Features ")
     print("="*50)
 
-    print("Available bar types:")
-    print("1. 📊 Standard Dollar Bars")
-    print("2. 🔄 Imbalance Dollar Bars")
-    print("3. 🏃 Run Dollar Bars")
+    print("Available features:")
+    print("1. Imbalance bars")
 
-    choice = input("\nEnter your choice (1-3): ").strip()
+    choice = input("\nEnter your choice (1): ").strip()
 
     if choice == "1":
-        print("\n📊 Generating Standard Dollar Bars...")
-        print(f"   Symbol: {config.symbol}")
-        print(f"   Data Type: {config.data_type}")
-        print(f"   Granularity: {config.granularity}")
-
-        # Ask which version to use
-        print("\n📌 Choose version:")
-        print("1. 🚀 Simple Version (Recommended - Stable and Fast)")
-        print("2. 🔧 Dask Version (Experimental)")
-
-        version_choice = input("\nChoice (1-2) [default: 1]: ").strip() or "1"
-
-        if version_choice == "1":
-            # Simplified version without Dask
-            try:
-                import sys
-                from pathlib import Path
-                sys.path.append(str(Path(__file__).parent / "src" / "features"))
-                from standard_dollar_bars_simple import generate_standard_bars_simple
-
-                # Generate bars
-                df_bars = generate_standard_bars_simple(
-                    data_type=config.data_type,
-                    futures_type=config.futures_type if config.data_type == 'futures' else 'um',
-                    granularity=config.granularity,
-                    threshold=40_000_000,  # Default volume threshold
-                    output_dir='./output/standard/'
-                )
-
-                if not df_bars.empty:
-                    print("✅ Standard Dollar Bars generation completed!")
-                    print(f"📊 Generated {len(df_bars):,} bars")
-                else:
-                    print("⚠️ No bars were generated")
-
-            except Exception as e:
-                print(f"❌ Standard Dollar Bars generation failed: {e}")
-
-        else:
-            # Original version with Dask
-            try:
-                import sys
-                from pathlib import Path
-                sys.path.append(str(Path(__file__).parent / "src" / "features"))
-                from standard_dollar_bars import process_files_and_generate_bars, setup_logging, setup_dask_client
-
-                # Setup for standard bars
-                setup_logging()
-                output_dir = Path('./output/standard/')
-
-                # Start Dask client with automatic CPU optimization
-                client = setup_dask_client()  # Uses automatic detection to maximize CPU
-
-                try:
-                    # Generate standard bars
-                    process_files_and_generate_bars(
-                        data_type=config.data_type,
-                        futures_type=config.futures_type if config.data_type == 'futures' else 'um',
-                        granularity=config.granularity,
-                        init_vol=40_000_000,  # Default volume threshold
-                        output_dir=output_dir,
-                        db_engine=None
-                    )
-                    print("✅ Standard Dollar Bars generation completed!")
-                finally:
-                    client.close()
-                    import gc
-                    gc.collect()
-            except Exception as e:
-                print(f"❌ Standard Dollar Bars generation failed: {e}")
-
-    elif choice == "2":
-        print("\n🔄 Generating Imbalance Dollar Bars...")
+        print("📊 Generating imbalance bars...")
         print(f"   Symbol: {config.symbol}")
         print(f"   Data Type: {config.data_type}")
         print(f"   Granularity: {config.granularity}")
         try:
-            # Use the existing imbalance_main import
             imbalance_main(
                 symbol=config.symbol,
                 data_type=config.data_type,
                 futures_type=config.futures_type if config.data_type == 'futures' else 'um',
                 granularity=config.granularity
             )
-            print("✅ Imbalance Dollar Bars generation completed!")
+            print("✅ Feature generation completed!")
         except Exception as e:
-            print(f"❌ Imbalance Dollar Bars generation failed: {e}")
-
-    elif choice == "3":
-        print("\n🏃 Generating Run Dollar Bars...")
-        print(f"   Symbol: {config.symbol}")
-        print(f"   Data Type: {config.data_type}")
-        print(f"   Granularity: {config.granularity}")
-        try:
-            # Import run dollar bars module
-            import sys
-            from pathlib import Path
-            sys.path.append(str(Path(__file__).parent / "src" / "scripts"))
-            from run_dollar_bars import process_run_dollar_bars
-
-            # Generate run bars with default parameters
-            process_run_dollar_bars(
-                data_type=config.data_type,
-                futures_type=config.futures_type if config.data_type == 'futures' else 'um',
-                granularity=config.granularity,
-                init_T0=1_000_000_000,  # Default initial threshold
-                alpha_volume=0.1,  # Default decay factor for volume
-                alpha_imbalance=0.1,  # Default decay factor for imbalance
-                output_dir='./output/run/',  # Output directory
-                time_reset=4  # Reset after 4 hours
-            )
-            print("✅ Run Dollar Bars generation completed!")
-        except Exception as e:
-            print(f"❌ Run Dollar Bars generation failed: {e}")
+            print(f"❌ Feature generation failed: {e}")
     else:
-        print("❌ Invalid choice. Please enter 1-3.")
+        print("❌ Invalid choice.")
 
 
 def interactive_main():

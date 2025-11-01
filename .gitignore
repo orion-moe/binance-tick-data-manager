@@ -32,13 +32,13 @@ env/
 *.ipynb_checkpoints/
 
 # Data files
-data/raw/
-data/processed/
-data/optimized/
+data/
 *.parquet
 *.csv
 *.xlsx
 *.zip
+*.ZIP
+*.CHECKSUM
 
 # Logs
 logs/
