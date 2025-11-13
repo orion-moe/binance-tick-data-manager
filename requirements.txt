@@ -1,15 +1,21 @@
-# Core dependencies for Crypto ML Finance Pipeline
+# Core dependencies
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0
+dask[complete]>=2023.5.0
+numba>=0.57.0
 
 # Data processing
-pandas==2.0.3
-pyarrow==12.0.0
-dask[complete]==2023.6.0
-numba==0.57.0
+requests>=2.31.0
+tqdm>=4.65.0
 
-# API and downloads
-requests==2.31.0
+# Logging and utilities
+loguru>=0.7.0
 
-# Utilities
-tqdm==4.65.0
-python-dotenv==1.0.0
-psutil==5.9.5
+# Visualization (for advanced validation)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Development dependencies
+jupyter>=1.0.0
+ipykernel>=6.23.0
