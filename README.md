@@ -75,6 +75,18 @@ df = dd.read_parquet("data/*.parquet")
 - ~10GB disk space per year of data (Parquet format)
 - Internet connection for downloading from Binance
 
+## Documentation
+
+📚 **Complete documentation available in [`documentation/`](documentation/)**
+
+- [INDEX.md](documentation/INDEX.md) - Documentation index
+- [DATA_STRUCTURE.md](documentation/DATA_STRUCTURE.md) - Directory structure and organization
+- [CPU_OPTIMIZATION.md](documentation/CPU_OPTIMIZATION.md) - Performance optimizations (6x faster!)
+- [CHECKSUM_VERIFICATION.md](documentation/CHECKSUM_VERIFICATION.md) - Data integrity verification
+- [PARQUET_COMPRESSION.md](documentation/PARQUET_COMPRESSION.md) - Compression details
+
+See [CLAUDE.md](CLAUDE.md) for architecture overview and design principles.
+
 ## License
 
 MIT

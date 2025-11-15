@@ -40,21 +40,23 @@ COLUMN_DTYPES = {
 class CSVToParquetConverter:
     def __init__(self, symbol: str = "BTCUSDT", data_type: str = "spot",
                  futures_type: str = "um", granularity: str = "monthly",
-                 base_dir: Path = Path(".")):
+                 base_dir: Path = Path("."), compression: str = "snappy"):
         """
         Initialize CSV to Parquet Converter
-        
+
         Args:
             symbol: Trading pair symbol (e.g., BTCUSDT)
             data_type: 'spot' or 'futures'
             futures_type: 'um' (USD-M) or 'cm' (COIN-M) - only used if data_type is 'futures'
             granularity: 'daily' or 'monthly'
             base_dir: Base directory for data storage
+            compression: Compression algorithm ('snappy', 'zstd', 'lz4', 'brotli', 'gzip', 'none')
         """
         self.symbol = symbol
         self.data_type = data_type
         self.futures_type = futures_type if data_type == "futures" else None
         self.granularity = granularity
+        self.compression = compression
         
         # Ensure base_dir points to data folder
         if base_dir == Path("."):
@@ -62,14 +64,15 @@ class CSVToParquetConverter:
         else:
             self.base_dir = base_dir
             
-        # Set up directories
-        if self.data_type == "spot":
-            self.raw_dir = self.base_dir / f"dataset-raw-{granularity}" / "spot"
-            self.compressed_dir = self.base_dir / f"dataset-raw-{granularity}-compressed" / "spot"
-        else:
-            self.raw_dir = self.base_dir / f"dataset-raw-{granularity}" / f"futures-{futures_type}"
-            self.compressed_dir = self.base_dir / f"dataset-raw-{granularity}-compressed" / f"futures-{futures_type}"
-            
+        # Set up directories using modern ticker-based structure
+        ticker_name = f"{symbol.lower()}-{data_type}"
+        if data_type == "futures":
+            ticker_name = f"{symbol.lower()}-{data_type}-{futures_type}"
+
+        self.ticker_dir = self.base_dir / ticker_name
+        self.raw_dir = self.ticker_dir / f"raw-zip-{granularity}"
+        self.compressed_dir = self.ticker_dir / f"raw-parquet-{granularity}"
+
         self.compressed_dir.mkdir(parents=True, exist_ok=True)
         
         # Progress tracking
@@ -212,11 +215,11 @@ class CSVToParquetConverter:
                     
                     # Add missing columns with default values
                     if 'isBestMatch' not in chunk.columns:
-                        chunk['isBestMatch'] = True  # Default value
+                        chunk['isBestMatch'] = False  # Not available in futures data
                 else:
                     # For files without headers, also check if isBestMatch is missing
                     if 'isBestMatch' not in chunk.columns:
-                        chunk['isBestMatch'] = True  # Default value
+                        chunk['isBestMatch'] = False  # Not available in futures data
                 
                 # Convert time column
                 if 'time' in chunk.columns:
@@ -227,16 +230,19 @@ class CSVToParquetConverter:
                         
                         if isinstance(sample_value, (int, np.integer)) or (isinstance(sample_value, str) and sample_value.isdigit()):
                             sample_int = int(sample_value)
-                            
-                            # Check if it's milliseconds (13 digits)
-                            if len(str(sample_int)) == 13:
+
+                            # Normalize all timestamps to milliseconds for consistency
+                            # This prevents schema mismatches in parquet files
+                            if len(str(sample_int)) >= 16:  # Microseconds (16 digits)
+                                # Convert microseconds to milliseconds first
+                                chunk['time'] = chunk['time'].astype('int64') // 1000
                                 chunk['time'] = pd.to_datetime(chunk['time'], unit='ms')
-                            # Check if it's microseconds (16 digits)
-                            elif len(str(sample_int)) == 16:
-                                chunk['time'] = pd.to_datetime(chunk['time'], unit='us')
-                            else:
-                                # Try auto-detection
-                                chunk['time'] = pd.to_datetime(chunk['time'])
+                            elif len(str(sample_int)) >= 13:  # Milliseconds (13 digits)
+                                chunk['time'] = pd.to_datetime(chunk['time'], unit='ms')
+                            else:  # Seconds (10 digits)
+                                # Convert seconds to milliseconds
+                                chunk['time'] = chunk['time'].astype('int64') * 1000
+                                chunk['time'] = pd.to_datetime(chunk['time'], unit='ms')
                         else:
                             # String format, use pandas auto-detection
                             chunk['time'] = pd.to_datetime(chunk['time'])
@@ -257,7 +263,8 @@ class CSVToParquetConverter:
             pq.write_table(
                 table,
                 output_file,
-                compression='snappy',
+                compression=self.compression,
+                use_dictionary=True,
                 row_group_size=100_000
             )
             

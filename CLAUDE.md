@@ -38,6 +38,27 @@ This is a cryptocurrency data pipeline for machine learning, focused on simplici
 5. **Validate** → Check data integrity
 6. **Features** → Generate Imbalance Dollar Bars
 
+### Directory Structure (Ticker-Based Organization)
+Each ticker gets its own directory for complete isolation:
+```
+data/
+├── btcusdt-spot/              # BTCUSDT spot market
+│   ├── raw-zip-daily/         # Downloaded ZIP/CSV files
+│   ├── raw-parquet-daily/     # Processed Parquet files (1:1 from ZIPs, snappy compressed)
+│   ├── raw-parquet-merged-daily/  # Large merged Parquet files (~10GB each, snappy compressed)
+│   ├── logs/                  # Download and processing logs
+│   ├── download_progress_daily.json
+│   └── failed_downloads.txt
+│
+├── btcusdt-futures-um/        # BTCUSDT futures USD-M
+│   └── (same structure as above)
+│
+└── ethusdt-spot/              # Other tickers follow same pattern
+    └── (same structure as above)
+
+output/                        # Generated features (cross-ticker)
+```
+
 ### Key Components
 - **main.py**: Central entry point with interactive CLI
 - **src/data_pipeline/**: Core ETL modules
@@ -50,7 +71,7 @@ This is a cryptocurrency data pipeline for machine learning, focused on simplici
   - imbalance_bars.py
   - imbalance_dollar_bars.py
   - standard_dollar_bars.py
-- **data/**: All data storage (Parquet files)
+- **data/**: Ticker-based data storage (Parquet files)
 - **output/**: Generated features
 
 ### Design Principles
@@ -58,9 +79,11 @@ This is a cryptocurrency data pipeline for machine learning, focused on simplici
 - **Fast**: Parquet files for 10x better performance than CSV
 - **Reliable**: Checksum verification and data validation
 - **Resumable**: Progress tracking for interrupted operations
+- **Organized**: Each ticker in its own directory for easy management
 
 ### Working with the Code
-- All paths use "data/" not "datasets/"
+- Each ticker has its own data/ subdirectory (e.g., data/btcusdt-spot/)
+- NO raw data is committed to git (protected by .gitignore)
 - Focus on main.py as the entry point
 - Use Parquet files directly - no database needed
 - Dask handles files larger than RAM automatically
