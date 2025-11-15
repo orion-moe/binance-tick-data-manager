@@ -18,6 +18,8 @@ import argparse
 import logging
 import json
 import time
+import multiprocessing
+import os
 
 # Column names for CSV files
 COLUMN_NAMES = [
@@ -39,6 +41,25 @@ ALT_COLUMN_NAMES = {
     'time': 'time',
     'is_buyer_maker': 'isBuyerMaker'
 }
+
+def get_optimal_workers(task_type: str = "io") -> int:
+    """
+    Calculate optimal number of workers based on CPU cores
+
+    Args:
+        task_type: "io" for I/O bound tasks (downloads), "cpu" for CPU bound tasks (processing)
+
+    Returns:
+        Optimal number of workers
+    """
+    cpu_count = multiprocessing.cpu_count()
+
+    if task_type == "io":
+        # For I/O bound tasks (downloads), use more workers (2-3x CPU cores)
+        return min(cpu_count * 2, 30)  # Cap at 30 to avoid overwhelming the server
+    else:  # cpu
+        # For CPU bound tasks (processing), use all available cores minus 1
+        return max(cpu_count - 1, 1)
 
 class BinanceDataDownloader:
     def __init__(self, symbol: str = "BTCUSDT", data_type: str = "spot",
@@ -62,35 +83,32 @@ class BinanceDataDownloader:
 
         # Ensure base_dir always points to the data folder
         if base_dir == Path("."):
-            # If running from project root, add data folder
-            current_file = Path(__file__).resolve()
-            data_dir = current_file.parent
-            if data_dir.name == "data":
-                self.base_dir = data_dir
-            else:
-                # If somehow not in data folder, use current directory
-                self.base_dir = Path.cwd()
-                if "data" not in str(self.base_dir):
-                    # If not in data folder, append it
-                    self.base_dir = self.base_dir / "data"
+            # Always use data folder from current working directory
+            self.base_dir = Path.cwd() / "data"
         else:
             self.base_dir = base_dir
         self.stop_on_error = stop_on_error
 
+        # Create ticker-specific directory: data/{symbol}-{type}/
+        # Example: data/btcusdt-spot/ or data/btcusdt-futures-um/
+        ticker_name = f"{symbol.lower()}-{data_type}"
+        if data_type == "futures":
+            ticker_name = f"{symbol.lower()}-{data_type}-{futures_type}"
+
+        self.ticker_dir = self.base_dir / ticker_name
+        self.ticker_dir.mkdir(parents=True, exist_ok=True)
+
         # Set up logging
         self.setup_logging()
 
-        # Progress tracking file
-        self.progress_file = self.base_dir / f"download_progress_{symbol}_{data_type}_{granularity}.json"
+        # Progress tracking file in ticker directory
+        self.progress_file = self.ticker_dir / f"download_progress_{granularity}.json"
         self.progress = self.load_progress()
 
-        # Set up directories based on data type
-        if self.data_type == "spot":
-            self.raw_dir = self.base_dir / f"dataset-raw-{granularity}" / "spot"
-            self.compressed_dir = self.base_dir / f"dataset-raw-{granularity}-compressed" / "spot"
-        else:  # futures
-            self.raw_dir = self.base_dir / f"dataset-raw-{granularity}" / f"futures-{futures_type}"
-            self.compressed_dir = self.base_dir / f"dataset-raw-{granularity}-compressed" / f"futures-{futures_type}"
+        # Set up directories inside ticker folder
+        # Structure: data/{ticker}/raw-zip-{granularity}/, data/{ticker}/raw-parquet-{granularity}/
+        self.raw_dir = self.ticker_dir / f"raw-zip-{granularity}"
+        self.compressed_dir = self.ticker_dir / f"raw-parquet-{granularity}"
 
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.compressed_dir.mkdir(parents=True, exist_ok=True)
@@ -119,8 +137,8 @@ class BinanceDataDownloader:
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
 
-        # Create logs directory if it doesn't exist
-        logs_dir = self.base_dir / 'logs'
+        # Create logs directory inside ticker directory
+        logs_dir = self.ticker_dir / 'logs'
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Create log filename with timestamp
@@ -795,21 +813,26 @@ class BinanceDataDownloader:
         summary += "="*60
         self.logger.info(summary)
 
-    def download_monthly_data(self, start_month: str, end_month: str, 
+    def download_monthly_data(self, start_month: str, end_month: str,
                             specific_months: List[Tuple[int, int]] = None,
-                            max_workers: int = 5) -> Tuple[int, int]:
+                            max_workers: int = None) -> Tuple[int, int]:
         """
         Download monthly data with support for specific months
-        
+
         Args:
             start_month: Start month in YYYY-MM format
             end_month: End month in YYYY-MM format
             specific_months: List of (year, month) tuples to download (overrides range)
-            max_workers: Number of parallel workers
+            max_workers: Number of parallel workers (None = auto-detect)
             
         Returns:
             Tuple of (successful_count, failed_count)
         """
+        # Auto-detect optimal workers if not specified
+        if max_workers is None:
+            max_workers = get_optimal_workers("io")
+            self.logger.info(f"🚀 Auto-detected {max_workers} download workers")
+
         try:
             # Parse dates
             start_date = datetime.strptime(start_month, '%Y-%m')
@@ -853,8 +876,19 @@ class BinanceDataDownloader:
             return 0, len(specific_months) if specific_months else 0
     
     def download_date_range(self, start_date: datetime, end_date: datetime,
-                          max_workers: int = 5) -> None:
-        """Download data for a date range"""
+                          max_workers: int = None) -> None:
+        """
+        Download data for a date range with optimized parallel processing
+
+        Args:
+            start_date: Start date for download
+            end_date: End date for download
+            max_workers: Number of parallel workers (None = auto-detect based on CPU cores)
+        """
+        # Auto-detect optimal workers if not specified
+        if max_workers is None:
+            max_workers = get_optimal_workers("io")
+            self.logger.info(f"🚀 Auto-detected {max_workers} download workers (CPU cores: {multiprocessing.cpu_count()})")
         # Exclude current day if end_date is today (data might not be complete)
         current_date = datetime.now()
         if end_date.date() == current_date.date() and self.granularity == 'daily':
@@ -948,8 +982,8 @@ class BinanceDataDownloader:
                 if len(failed_downloads) > 10:
                     self.logger.info(f"    ... and {len(failed_downloads) - 10} more")
 
-            # Save failed downloads to file
-            failed_downloads_path = self.base_dir / 'failed_downloads.txt'
+            # Save failed downloads to file in ticker directory
+            failed_downloads_path = self.ticker_dir / 'failed_downloads.txt'
             with open(failed_downloads_path, 'w') as f:
                 f.write(f"Failed downloads for {self.symbol} {self.data_type} {self.granularity}\n")
                 f.write(f"Generated on {datetime.now()}\n\n")
@@ -1011,36 +1045,68 @@ class BinanceDataDownloader:
                 files_to_process.append((date, zip_file, 'zip_ready'))
 
         if files_to_process:
+            # Calculate optimal workers for CPU-bound processing
+            process_workers = get_optimal_workers("cpu")
             self.logger.info(f"Processing {len(files_to_process)} files from various states...")
+            self.logger.info(f"🚀 Using {process_workers} parallel workers for file processing")
 
-            total_files = len(files_to_process)
-            for idx, (date, file_path, state) in enumerate(files_to_process, 1):
+            def process_single_file(task_data):
+                """Process a single file (for parallel execution)"""
+                idx, date, file_path, state = task_data
+                total_files = len(files_to_process)
                 self.logger.info(f"📁 Processing file {idx}/{total_files}: {file_path.name} (state: {state})...")
 
                 success = False
-                if state == 'zip_ready':
-                    # Process ZIP file with retry logic
-                    success = self.process_file_with_retry(date, file_path, max_retries=3)
-                elif state == 'csv_ready':
-                    # Process CSV file directly
-                    try:
+                try:
+                    if state == 'zip_ready':
+                        # Process ZIP file with retry logic
+                        success = self.process_file_with_retry(date, file_path, max_retries=3)
+                    elif state == 'csv_ready':
+                        # Process CSV file directly
                         success = self.process_csv_to_parquet([file_path])
                         if success:
                             date_str = date.strftime('%Y-%m-%d' if self.granularity == 'daily' else '%Y-%m')
                             if date_str not in self.progress.get('processed', []):
                                 self.progress['processed'].append(date_str)
                                 self.save_progress()
-                    except Exception as e:
-                        self.logger.error(f"❌ Error processing CSV {file_path.name}: {e}")
-                        success = False
+                except Exception as e:
+                    self.logger.error(f"❌ Error processing {file_path.name}: {e}")
+                    success = False
 
-                if not success:
-                    self.logger.error(f"❌ Failed to process {file_path.name} after all retry attempts")
-                    if self.stop_on_error:
-                        self.logger.error(f"⚠️  Stopping due to error. File {file_path.name} preserved for retry.")
-                        raise RuntimeError(f"Failed to process {file_path.name} after all retry attempts")
-                    else:
-                        self.logger.warning(f"⚠️  Continuing with next file. File {file_path.name} preserved for retry.")
+                return (file_path, success)
+
+            # Process files in parallel
+            failed_files = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=process_workers) as executor:
+                # Create tasks with index
+                tasks = [(idx, date, file_path, state)
+                        for idx, (date, file_path, state) in enumerate(files_to_process, 1)]
+
+                # Submit all tasks
+                futures = [executor.submit(process_single_file, task) for task in tasks]
+
+                # Collect results
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        file_path, success = future.result()
+                        if not success:
+                            failed_files.append(file_path)
+                    except Exception as e:
+                        self.logger.error(f"❌ Exception in parallel processing: {e}")
+
+            # Handle failures
+            if failed_files:
+                self.logger.error(f"❌ Failed to process {len(failed_files)} files:")
+                for failed_file in failed_files[:10]:
+                    self.logger.error(f"  - {failed_file.name}")
+                if len(failed_files) > 10:
+                    self.logger.error(f"  ... and {len(failed_files) - 10} more")
+
+                if self.stop_on_error:
+                    self.logger.error(f"⚠️  Stopping due to errors. Failed files preserved for retry.")
+                    raise RuntimeError(f"Failed to process {len(failed_files)} files")
+                else:
+                    self.logger.warning(f"⚠️  Continuing despite errors. Failed files preserved for retry.")
 
         # Note: existing CSV files are now handled in the unified processing above
 
@@ -1200,8 +1266,8 @@ class BinanceDataDownloader:
         """Verify integrity of optimized parquet files and optionally cleanup old files"""
         self.logger.info("\n🔍 Verifying optimized parquet files integrity...")
 
-        # Find optimized directory
-        optimized_dir = self.base_dir / f"dataset-raw-{self.granularity}-compressed-optimized" / (f"futures-{self.futures_type}" if self.data_type == "futures" else "spot")
+        # Find optimized directory in ticker folder
+        optimized_dir = self.ticker_dir / f"raw-parquet-merged-daily"
 
         if not optimized_dir.exists():
             self.logger.error(f"❌ No optimized directory found at: {optimized_dir}")
@@ -1334,7 +1400,7 @@ class BinanceDataDownloader:
             from optimize_parquet_files import ParquetOptimizer
 
             source_dir = self.compressed_dir
-            target_dir = self.base_dir / f"dataset-raw-{self.granularity}-compressed-optimized" / (f"futures-{self.futures_type}" if self.data_type == "futures" else "spot")
+            target_dir = self.ticker_dir / f"raw-parquet-merged-daily"
 
             self.logger.info(f"\n🚀 Starting Parquet optimization...")
             self.logger.info(f"Source: {source_dir.absolute()}")
@@ -1376,11 +1442,11 @@ class BinanceDataDownloader:
 
     def update_optimized_dataset(self) -> None:
         """Update optimized dataset with missing days since last timestamp"""
-        # Check for optimized dataset in monthly directory (where it was created)
-        optimized_dir = self.base_dir / "dataset-raw-monthly-compressed-optimized" / (f"futures-{self.futures_type}" if self.data_type == "futures" else "spot")
+        # Check for optimized dataset in ticker directory
+        optimized_dir = self.ticker_dir / f"raw-parquet-merged-daily"
 
         self.logger.info(f"🔍 Looking for optimized dataset at: {optimized_dir}")
-        self.logger.info(f"📁 Base directory: {self.base_dir.absolute()}")
+        self.logger.info(f"📁 Ticker directory: {self.ticker_dir.absolute()}")
         self.logger.info(f"📍 Absolute path: {optimized_dir.absolute()}")
         self.logger.info(f"🗂️  Directory exists: {optimized_dir.exists()}")
 
@@ -1439,13 +1505,9 @@ class BinanceDataDownloader:
         original_granularity = self.granularity
         self.granularity = "daily"
 
-        # Update directory paths for daily data
-        if self.data_type == "spot":
-            self.raw_dir = self.base_dir / "dataset-raw-daily" / "spot"
-            self.compressed_dir = self.base_dir / "dataset-raw-daily-compressed" / "spot"
-        else:  # futures
-            self.raw_dir = self.base_dir / "dataset-raw-daily" / f"futures-{self.futures_type}"
-            self.compressed_dir = self.base_dir / "dataset-raw-daily-compressed" / f"futures-{self.futures_type}"
+        # Update directory paths for daily data within ticker directory
+        self.raw_dir = self.ticker_dir / "raw-zip-daily"
+        self.compressed_dir = self.ticker_dir / "raw-parquet-daily"
 
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.compressed_dir.mkdir(parents=True, exist_ok=True)
@@ -1753,9 +1815,10 @@ def interactive_menu():
             except ValueError:
                 print(f"Invalid date format. Please use {date_format}")
 
-        # Get number of workers
-        workers_str = input("\nNumber of concurrent downloads (default: 5): ").strip()
-        max_workers = int(workers_str) if workers_str.isdigit() else 5
+        # Get number of workers (auto-detect by default)
+        optimal_workers = get_optimal_workers("io")
+        workers_str = input(f"\nNumber of concurrent downloads (default: {optimal_workers} - auto-detected): ").strip()
+        max_workers = int(workers_str) if workers_str.isdigit() else None  # None = auto-detect
     elif action in ["optimize", "update_optimized", "verify_integrity"]:
         # For optimization, update_optimized, and verify_integrity, we don't need date ranges or workers
         start_str = end_str = "N/A"
@@ -1855,8 +1918,8 @@ Examples:
                                    help='Start date (YYYY-MM-DD for daily, YYYY-MM for monthly)')
         download_parser.add_argument('--end', required=True,
                                    help='End date (YYYY-MM-DD for daily, YYYY-MM for monthly)')
-        download_parser.add_argument('--workers', type=int, default=5,
-                                   help='Number of concurrent downloads (default: 5)')
+        download_parser.add_argument('--workers', type=int, default=None,
+                                   help='Number of concurrent downloads (default: auto-detect based on CPU cores)')
 
         # Update command
         update_parser = subparsers.add_parser('update', help='Update existing dataset')

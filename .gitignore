@@ -31,14 +31,19 @@ env/
 .ipynb_checkpoints
 *.ipynb_checkpoints/
 
-# Data files
+# Data files - ALL raw data must be ignored
 data/
+!data/README.md
 *.parquet
 *.csv
 *.xlsx
 *.zip
 *.ZIP
 *.CHECKSUM
+*progress*.json
+download_progress_*.json
+conversion_progress_*.json
+failed_downloads.txt
 
 # Logs
 logs/

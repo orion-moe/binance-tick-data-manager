@@ -19,10 +19,11 @@ sys.path.append(str(Path(__file__).parent.parent))
 from validators.missing_dates_validator import MissingDatesValidator
 
 class EnhancedParquetOptimizer:
-    def __init__(self, source_dir: str, target_dir: str, max_size_gb: int = 10):
+    def __init__(self, source_dir: str, target_dir: str, max_size_gb: int = 10, compression: str = "snappy"):
         self.source_dir = Path(source_dir)
         self.target_dir = Path(target_dir)
         self.max_size_bytes = max_size_gb * 1024**3
+        self.compression = compression
         self._auto_confirm = False
         
         # Create target directory
@@ -230,9 +231,9 @@ class EnhancedParquetOptimizer:
                     # Create new output file
                     current_output_path = self.target_dir / f"BTCUSDT-Trades-Optimized-{output_file_count:03d}.parquet"
                     current_writer = pq.ParquetWriter(
-                        current_output_path, 
+                        current_output_path,
                         standard_schema,
-                        compression='snappy',
+                        compression=self.compression,
                         use_dictionary=True,
                         use_deprecated_int96_timestamps=False
                     )
@@ -381,12 +382,15 @@ def main():
                        help='Target directory for optimized files')
     parser.add_argument('--max-size', type=int, default=10,
                        help='Maximum file size in GB (default: 10)')
+    parser.add_argument('--compression', type=str, default='snappy',
+                       choices=['snappy', 'zstd', 'lz4', 'brotli', 'gzip', 'none'],
+                       help='Compression algorithm (default: snappy)')
     parser.add_argument('--auto-confirm', action='store_true',
                        help='Automatically confirm deletion of original files')
-    
+
     args = parser.parse_args()
-    
-    optimizer = EnhancedParquetOptimizer(args.source, args.target, args.max_size)
+
+    optimizer = EnhancedParquetOptimizer(args.source, args.target, args.max_size, args.compression)
     
     if args.auto_confirm:
         optimizer._auto_confirm = True
