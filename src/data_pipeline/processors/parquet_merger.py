@@ -194,7 +194,13 @@ class ParquetMerger:
 
                 # Filter out existing data
                 if last_timestamp is not None:
-                    daily_df_filtered = daily_df[daily_df['time'] > last_timestamp]
+                    # Convert last_timestamp to pandas Timestamp if it's an int (milliseconds)
+                    if isinstance(last_timestamp, int):
+                        last_timestamp_dt = pd.Timestamp(last_timestamp, unit='ms')
+                    else:
+                        last_timestamp_dt = last_timestamp
+
+                    daily_df_filtered = daily_df[daily_df['time'] > last_timestamp_dt]
                     logger.debug(f"Filtered to {len(daily_df_filtered)} new rows")
                 else:
                     daily_df_filtered = daily_df

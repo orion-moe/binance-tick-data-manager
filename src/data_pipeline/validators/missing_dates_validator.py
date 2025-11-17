@@ -19,18 +19,28 @@ class MissingDatesValidator:
     def __init__(self, data_dir: str, symbol: str = "BTCUSDT"):
         self.data_dir = Path(data_dir)
         self.symbol = symbol
-        self.pattern = f"{symbol}-Trades-(\\d{{4}})-(\\d{{2}})\\.parquet"
-        self.optimized_pattern = f"{symbol}-Trades-Optimized-\\d{{3}}\\.parquet"
-        
+        # Support both monthly and daily file patterns (case-insensitive)
+        self.pattern_monthly = f"{symbol}-[Tt]rades-(\\d{{4}})-(\\d{{2}})\\.parquet"
+        self.pattern_daily = f"{symbol}-[Tt]rades-(\\d{{4}})-(\\d{{2}})-(\\d{{2}})\\.parquet"
+        self.optimized_pattern = f"{symbol}-[Tt]rades-[Oo]ptimized-\\d{{3}}\\.parquet"
+
         # Get logger (logging should be configured by main.py)
         self.logger = logging.getLogger(__name__)
     
     def extract_date_from_filename(self, filename: str) -> Optional[Tuple[int, int]]:
-        """Extract year and month from filename"""
-        match = re.match(self.pattern, filename)
+        """Extract year and month from filename (supports both monthly and daily files)"""
+        # Try daily pattern first (YYYY-MM-DD)
+        match = re.match(self.pattern_daily, filename)
+        if match:
+            year, month, day = match.groups()
+            return int(year), int(month)
+
+        # Try monthly pattern (YYYY-MM)
+        match = re.match(self.pattern_monthly, filename)
         if match:
             year, month = match.groups()
             return int(year), int(month)
+
         return None
     
     def _get_months_from_optimized_files(self, optimized_files: List[Path]) -> List[Tuple[int, int]]:
@@ -79,8 +89,9 @@ class MissingDatesValidator:
             self.logger.error(f"Directory not found: {self.data_dir}")
             return existing_months
         
-        # Check if we have optimized files
-        optimized_files = list(self.data_dir.glob(f"{self.symbol}-Trades-Optimized-*.parquet"))
+        # Check if we have optimized files (case-insensitive search)
+        optimized_files = [f for f in self.data_dir.glob("*.parquet")
+                          if re.match(self.optimized_pattern, f.name, re.IGNORECASE)]
         if optimized_files:
             self.logger.info(f"Found {len(optimized_files)} optimized files")
             optimized_months = self._get_months_from_optimized_files(optimized_files)
@@ -95,13 +106,13 @@ class MissingDatesValidator:
                 # Return empty list to indicate no valid data found
                 return []
         
-        # Regular monthly files
-        for file_path in self.data_dir.glob(f"{self.symbol}-Trades-*.parquet"):
+        # Regular monthly/daily files (case-insensitive search)
+        for file_path in self.data_dir.glob("*.parquet"):
             date_tuple = self.extract_date_from_filename(file_path.name)
             if date_tuple:
                 existing_months.append(date_tuple)
-        
-        return sorted(existing_months)
+
+        return sorted(list(set(existing_months)))  # Remove duplicates and sort
     
     def find_missing_months(self, start_date: Optional[str] = None, 
                           end_date: Optional[str] = None) -> List[Dict[str, any]]:

@@ -20,7 +20,7 @@ from src.data_pipeline.converters.csv_to_parquet import CSVToParquetConverter
 from src.data_pipeline.converters.zip_to_parquet_streamer import ZipToParquetStreamer
 from src.data_pipeline.processors.parquet_optimizer import main as optimize_main
 from src.data_pipeline.validators.missing_dates_validator import main as missing_dates_main
-from src.features.imbalance_bars import main as imbalance_main
+from src.features.bars.imbalance_bars import main as imbalance_main
 
 
 def setup_logging():
@@ -36,6 +36,9 @@ def setup_logging():
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
+
+    # Clear existing handlers to prevent duplicates
+    root_logger.handlers.clear()
 
     # File handler with rotation
     file_handler = RotatingFileHandler(
@@ -2542,71 +2545,49 @@ def run_feature_generation(config: PipelineConfig):
         print(f"   Data Type: {config.data_type}")
         print(f"   Granularity: {config.granularity}")
 
-        # Ask which version to use
-        print("\n📌 Choose version:")
-        print("1. 🚀 Simple Version (Recommended - Stable and Fast)")
-        print("2. 🔧 Dask Version (Experimental)")
+        # Ask for volume threshold
+        volume_input = input("\n💰 Enter volume threshold in USD (default: 40000000): ").strip()
+        try:
+            volume_threshold = int(volume_input) if volume_input else 40_000_000
+            if volume_threshold <= 0:
+                print("⚠️ Volume must be positive. Using default: 40,000,000")
+                volume_threshold = 40_000_000
+        except ValueError:
+            print("⚠️ Invalid input. Using default: 40,000,000")
+            volume_threshold = 40_000_000
 
-        version_choice = input("\nChoice (1-2) [default: 1]: ").strip() or "1"
+        print(f"📊 Using volume threshold: {volume_threshold:,} USD")
 
-        if version_choice == "1":
-            # Simplified version without Dask
+        try:
+            import sys
+            from pathlib import Path
+            sys.path.append(str(Path(__file__).parent / "src" / "features" / "bars"))
+            from standard_dollar_bars import process_files_and_generate_bars, setup_logging, setup_dask_client
+
+            # Setup for standard bars
+            setup_logging()
+            output_dir = Path('./output/standard/')
+
+            # Start Dask client with automatic CPU optimization
+            client = setup_dask_client()  # Uses automatic detection to maximize CPU
+
             try:
-                import sys
-                from pathlib import Path
-                sys.path.append(str(Path(__file__).parent / "src" / "features"))
-                from standard_dollar_bars_simple import generate_standard_bars_simple
-
-                # Generate bars
-                df_bars = generate_standard_bars_simple(
+                # Generate standard bars
+                process_files_and_generate_bars(
                     data_type=config.data_type,
                     futures_type=config.futures_type if config.data_type == 'futures' else 'um',
                     granularity=config.granularity,
-                    threshold=40_000_000,  # Default volume threshold
-                    output_dir='./output/standard/'
+                    init_vol=volume_threshold,
+                    output_dir=output_dir,
+                    db_engine=None
                 )
-
-                if not df_bars.empty:
-                    print("✅ Standard Dollar Bars generation completed!")
-                    print(f"📊 Generated {len(df_bars):,} bars")
-                else:
-                    print("⚠️ No bars were generated")
-
-            except Exception as e:
-                print(f"❌ Standard Dollar Bars generation failed: {e}")
-
-        else:
-            # Original version with Dask
-            try:
-                import sys
-                from pathlib import Path
-                sys.path.append(str(Path(__file__).parent / "src" / "features"))
-                from standard_dollar_bars import process_files_and_generate_bars, setup_logging, setup_dask_client
-
-                # Setup for standard bars
-                setup_logging()
-                output_dir = Path('./output/standard/')
-
-                # Start Dask client with automatic CPU optimization
-                client = setup_dask_client()  # Uses automatic detection to maximize CPU
-
-                try:
-                    # Generate standard bars
-                    process_files_and_generate_bars(
-                        data_type=config.data_type,
-                        futures_type=config.futures_type if config.data_type == 'futures' else 'um',
-                        granularity=config.granularity,
-                        init_vol=40_000_000,  # Default volume threshold
-                        output_dir=output_dir,
-                        db_engine=None
-                    )
-                    print("✅ Standard Dollar Bars generation completed!")
-                finally:
-                    client.close()
-                    import gc
-                    gc.collect()
-            except Exception as e:
-                print(f"❌ Standard Dollar Bars generation failed: {e}")
+                print("✅ Standard Dollar Bars generation completed!")
+            finally:
+                client.close()
+                import gc
+                gc.collect()
+        except Exception as e:
+            print(f"❌ Standard Dollar Bars generation failed: {e}")
 
     elif choice == "2":
         print("\n🔄 Generating Imbalance Dollar Bars...")

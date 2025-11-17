@@ -59,12 +59,10 @@ def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
     """
     Builds the data path in a portable way, relative to the script.
     """
-    project_root = Path(__file__).parent.parent.parent # Sobe dois níveis para a raiz do projeto
+    project_root = Path(__file__).parent.parent.parent.parent  # Sobe 3 níveis: bars/ -> features/ -> src/ -> raiz
 
-    # Se o diretório 'data' não for encontrado, usa um caminho padrão
+    # Diretório de dados
     data_dir = project_root / 'data'
-    if not data_dir.exists():
-        data_dir = Path.home() / "Desktop/hub/trading/ldp-finance/data"
 
     if data_type == 'spot':
         return data_dir / f'dataset-raw-{granularity}-compressed-optimized' / 'spot'
@@ -124,29 +122,31 @@ def apply_operations_optimized(df_dask, meta):
 @njit(
     types.Tuple((
         # Assinatura de retorno para a lista de barras (14 elementos por barra)
+        # start_time(int64), end_time(int64), open, high, low, close, theta_k, buy_vol, total_vol_usd, total_vol, ticks, ticks_buy, ewma_T, ewma_imbalance
         types.ListType(types.Tuple((
-            types.float64, types.float64, types.float64, types.float64, types.float64,
+            types.int64, types.int64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64
         ))),
         # Assinatura de retorno para o estado final do sistema (15 elementos)
+        # open, high, low, close, start_time(int64), end_time(int64), imbalance, buy_vol, total_vol_usd, total_vol, ticks, ticks_buy, ewma_T, ewma_imbalance, warm
         types.Tuple((
-            types.float64, types.float64, types.float64, types.float64, types.float64,
-            types.float64, types.float64, types.float64, types.float64, types.float64,
+            types.float64, types.float64, types.float64, types.float64, types.int64,
+            types.int64, types.float64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64, types.boolean
         )),
     ))(
         # Assinaturas dos argumentos de entrada
         types.float64[:],       # prices
-        types.float64[:],       # times
+        types.int64[:],         # times (agora int64 - timestamps em milissegundos)
         types.float64[:],       # net_volumes
         types.int8[:],          # sides
         types.float64[:],       # qtys
         types.float64,          # alpha_ticks
         types.float64,          # alpha_imbalance
         types.Tuple((           # system_state (15 elementos)
-            types.float64, types.float64, types.float64, types.float64, types.float64,
-            types.float64, types.float64, types.float64, types.float64, types.float64,
+            types.float64, types.float64, types.float64, types.float64, types.int64,
+            types.int64, types.float64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64, types.boolean
         )),
         types.float64,          # init_ticks
@@ -166,9 +166,9 @@ def process_partition_imbalance_numba(
     else:
         threshold = ewma_T * ewma_imbalance
 
-    # Convert time_reset (em horas) para nanosegundos para comparação
-    # 1 hora = 3.600 segundos = 3.6e12 nanosegundos
-    time_reset_ns = 3_600_000.0 * 1_000_000.0 * time_reset
+    # Converte time_reset (em horas) para milissegundos para comparação
+    # 1 hora = 3.600 segundos = 3.600.000 milissegundos
+    time_reset_ms = 3_600_000.0 * time_reset
 
     bars = List()
 
@@ -220,12 +220,12 @@ def process_partition_imbalance_numba(
 
             # Reseta o estado para a próxima barra
             bar_open, bar_high, bar_low, bar_close = np.nan, -np.inf, np.inf, np.nan
-            bar_start_time, bar_end_time = np.nan, np.nan
+            bar_start_time, bar_end_time = 0, 0  # int64: 0 indica sem valor
             current_imbalance, buy_volume_usd, total_volume_usd, total_volume, ticks, ticks_buy = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
             # Atualiza o threshold para a próxima barra.
-            # Se a barra demorou mais que `time_reset_ns`, reseta para o estado inicial.
-            if time_since_bar_start > time_reset_ns:
+            # Se a barra demorou mais que `time_reset_ms`, reseta para o estado inicial.
+            if time_since_bar_start > time_reset_ms:
                 warm = True
                 threshold = init_ticks
             else:
@@ -245,7 +245,8 @@ def process_partition_imbalance_numba(
 def create_imbalance_dollar_bars_numba(partition, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset):
     """Função wrapper para processar uma partição com Numba."""
     prices = partition['price'].values.astype(np.float64)
-    times = partition['time'].values.astype(np.float64)
+    # Converte datetime64[ms] para timestamp em milissegundos (int64)
+    times = partition['time'].values.astype('datetime64[ms]').astype(np.int64)
     net_volumes = partition['net_volumes'].values.astype(np.float64)
     sides = partition['side'].values.astype(np.int8)
     qtys = partition['qty'].values.astype(np.float64)
@@ -318,12 +319,13 @@ def process_files_and_generate_bars(
     output_file_prefix_parquet = f'{timestamp}-imbalance-{data_type}-ticks{init_ticks}-aticks{alpha_ticks}-aimb{alpha_imbalance}-treset{time_reset}'
 
     # O estado inicial precisa ter 15 elementos, incluindo 'warm'
+    # start_time e end_time agora são int64 (0 indica sem valor)
     system_state = (
-        np.nan, -np.inf, np.inf, np.nan, np.nan, np.nan, # bar_open, high, low, close, start_time, end_time (6)
-        0.0, 0.0, 0.0, 0.0, # current_imbalance, buy_volume_usd, total_volume_usd, total_volume (4)
-        0.0, 0.0,           # ticks, ticks_buy (2)
-        float(init_ticks), 0.0, # ewma_T, ewma_imbalance (2) - ewma_imbalance começa em 0.0
-        True # warm (1)
+        np.nan, -np.inf, np.inf, np.nan, 0, 0,  # bar_open, high, low, close, start_time(int64), end_time(int64) (6)
+        0.0, 0.0, 0.0, 0.0,                     # current_imbalance, buy_volume_usd, total_volume_usd, total_volume (4)
+        0.0, 0.0,                               # ticks, ticks_buy (2)
+        float(init_ticks), 0.0,                 # ewma_T, ewma_imbalance (2) - ewma_imbalance começa em 0.0
+        True                                    # warm (1)
     )
 
     results = []
@@ -342,7 +344,8 @@ def process_files_and_generate_bars(
         if not bars.empty:
             results.append(bars)
             if db_engine:
-                bars['end_time'] = pd.to_datetime(bars['end_time'], unit='ns')
+                # Converte timestamps de milissegundos para datetime
+                bars['end_time'] = pd.to_datetime(bars['end_time'], unit='ms')
                 bars.drop(columns=['start_time'], inplace=True)
                 bars['type'] = 'Imbalance'
                 bars['sample_date'] = timestamp
@@ -363,7 +366,8 @@ def process_files_and_generate_bars(
 
     if results:
         all_bars = pd.concat(results, ignore_index=True)
-        all_bars['end_time'] = pd.to_datetime(all_bars['end_time'], unit='ns')
+        # Converte timestamps de milissegundos para datetime
+        all_bars['end_time'] = pd.to_datetime(all_bars['end_time'], unit='ms')
         all_bars.drop(columns=['start_time'], inplace=True)
 
         final_path = output_dir / f'{output_file_prefix_parquet}.parquet'
@@ -377,11 +381,15 @@ if __name__ == '__main__':
     granularity = 'daily'
     output_dir = './output/'
 
-    params = [[init_ticks, alpha_ticks/100, alpha_imbalance/100, time_reset]
-                for init_ticks in range(1000, 1200, 200)
-                for alpha_ticks in range(10, 100, 30)
-                for alpha_imbalance in range(10, 100, 30)
-                for time_reset in range(1, 11)]
+    # TESTE ÚNICO - Parâmetros razoáveis
+    params = [[1000, 0.5, 0.5, 5.0]]  # init_ticks=1000, alpha_ticks=50%, alpha_imbalance=50%, time_reset=5h
+
+    # GRID SEARCH COMPLETO (comentado) - Descomente para rodar todos os 90 testes
+    # params = [[init_ticks, alpha_ticks/100, alpha_imbalance/100, time_reset]
+    #             for init_ticks in range(1000, 1200, 200)
+    #             for alpha_ticks in range(10, 100, 30)
+    #             for alpha_imbalance in range(10, 100, 30)
+    #             for time_reset in range(1, 11)]
 
     setup_logging()
     client = setup_dask_client(n_workers=10, threads_per_worker=1, memory_limit='6GB')

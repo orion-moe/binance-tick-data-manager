@@ -36,6 +36,9 @@ def setup_logging():
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
 
+    # Clear existing handlers to prevent duplicates
+    root_logger.handlers.clear()
+
     # File handler with rotation
     file_handler = RotatingFileHandler(
         log_path,

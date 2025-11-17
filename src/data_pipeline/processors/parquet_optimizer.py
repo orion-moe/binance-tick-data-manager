@@ -25,12 +25,34 @@ class EnhancedParquetOptimizer:
         self.max_size_bytes = max_size_gb * 1024**3
         self.compression = compression
         self._auto_confirm = False
-        
+        self.symbol = None  # Will be auto-detected
+
         # Create target directory
         self.target_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Setup logging
         self.logger = logging.getLogger(__name__)
+
+    def _detect_symbol_from_files(self) -> str:
+        """Auto-detect symbol from first parquet file in source directory"""
+        import re
+
+        # Get first parquet file
+        parquet_files = list(self.source_dir.glob("*.parquet"))
+        if not parquet_files:
+            self.logger.warning("No parquet files found, defaulting to BTCUSDT")
+            return "BTCUSDT"
+
+        # Extract symbol from filename (pattern: SYMBOL-trades-YYYY-MM-DD.parquet or SYMBOL-Trades-YYYY-MM.parquet)
+        first_file = parquet_files[0].name
+        match = re.match(r"([A-Z]+)-[Tt]rades-", first_file)
+        if match:
+            symbol = match.group(1)
+            self.logger.info(f"Auto-detected symbol: {symbol}")
+            return symbol
+
+        self.logger.warning(f"Could not detect symbol from {first_file}, defaulting to BTCUSDT")
+        return "BTCUSDT"
     
     def get_parquet_info(self, file_path: Path) -> dict:
         """Get information about a Parquet file"""
@@ -64,9 +86,13 @@ class EnhancedParquetOptimizer:
     def check_missing_dates(self) -> bool:
         """Check for missing dates before optimization"""
         self.logger.info("\n🔍 Checking for missing dates in the dataset...")
-        
+
+        # Auto-detect symbol if not already set
+        if not self.symbol:
+            self.symbol = self._detect_symbol_from_files()
+
         # Initialize validator
-        validator = MissingDatesValidator(str(self.source_dir), "BTCUSDT")
+        validator = MissingDatesValidator(str(self.source_dir), self.symbol)
         report = validator.generate_report(check_daily_gaps=False)
         
         # Print summary
@@ -229,7 +255,7 @@ class EnhancedParquetOptimizer:
                         created_files.append(current_output_path)
                     
                     # Create new output file
-                    current_output_path = self.target_dir / f"BTCUSDT-Trades-Optimized-{output_file_count:03d}.parquet"
+                    current_output_path = self.target_dir / f"{self.symbol}-Trades-Optimized-{output_file_count:03d}.parquet"
                     current_writer = pq.ParquetWriter(
                         current_output_path,
                         standard_schema,

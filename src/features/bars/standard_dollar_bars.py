@@ -54,19 +54,21 @@ def setup_dask_client(n_workers=None, threads_per_worker=None, memory_limit=None
     cpu_count = multiprocessing.cpu_count()
     available_memory = psutil.virtual_memory().available / (1024**3)  # Em GB
 
-    # Se não especificado, usa configuração otimizada
+    # Se não especificado, usa configuração otimizada CONSERVADORA
     if n_workers is None:
-        # Uses metade dos cores como workers, cada um com 2 threads
-        # Isso geralmente dá melhor performance que muitos workers com 1 thread
-        n_workers = max(cpu_count // 2, 1)
+        # Usa menos workers para evitar contenção (1/3 dos cores, min 2, max 6)
+        # Menos workers = mais memória por worker = menos crashes
+        n_workers = max(min(cpu_count // 3, 6), 2)
 
     if threads_per_worker is None:
-        # Calculate threads para usar todos os cores disponíveis
-        threads_per_worker = max(cpu_count // n_workers, 1)
+        # Usa apenas 1 thread por worker para evitar race conditions
+        # Processamento sequencial é mais estável para operações pesadas
+        threads_per_worker = 1
 
     if memory_limit is None:
-        # Uses 90% da memória disponível dividida entre workers
-        memory_per_worker = (available_memory * 0.9) / n_workers
+        # Uses 60% da memória disponível dividida entre workers (ainda mais conservador)
+        # Deixa 40% livre para sistema operacional e cache de disco
+        memory_per_worker = (available_memory * 0.6) / n_workers
         memory_limit = f'{memory_per_worker:.1f}GB'
 
     logging.info(f"🖥️ CPUs detectadas: {cpu_count}")
@@ -79,9 +81,32 @@ def setup_dask_client(n_workers=None, threads_per_worker=None, memory_limit=None
         threads_per_worker=threads_per_worker,
         memory_limit=memory_limit,
         processes=True,  # Uses processos separados para melhor paralelismo
-        silence_logs=logging.ERROR  # Reduz logs do Dask para melhorar performance
+        silence_logs=logging.ERROR,  # Reduz logs do Dask para melhorar performance
+        # Configurações adicionais para estabilidade
+        death_timeout=600,  # Tempo para considerar worker morto (10 min - aumentado)
+        lifetime='30 minutes',  # Recria workers a cada 30 min para evitar memory leaks
+        lifetime_stagger='5 minutes',  # Stagger para não recriar todos ao mesmo tempo
     )
-    client = Client(cluster)
+
+    # Configurações de resiliência
+    import dask
+    dask.config.set({
+        'distributed.scheduler.allowed-failures': 5,  # Permite 5 falhas antes de desistir
+        'distributed.comm.timeouts.connect': '300s',  # Timeout de conexão
+        'distributed.comm.timeouts.tcp': '300s',  # Timeout TCP
+        'distributed.scheduler.work-stealing': False,  # DESABILITA work stealing (causa deadlocks)
+        'distributed.worker.memory.target': 0.75,  # Começa a liberar memória em 75%
+        'distributed.worker.memory.spill': 0.85,  # Spill to disk em 85%
+        'distributed.worker.memory.pause': 0.90,  # Pausa worker em 90%
+        'distributed.worker.memory.terminate': 0.98,  # Termina worker em 98%
+    })
+
+    client = Client(
+        cluster,
+        # Timeouts aumentados para evitar erros de coleta
+        timeout='600s',  # Timeout para operações de rede (aumentado para 10 min)
+        heartbeat_interval='60s',  # Intervalo de heartbeat (reduzido overhead)
+    )
 
     # Otimizações adicionais
     client.run(lambda: __import__('gc').collect())  # Força garbage collection em todos workers
@@ -92,15 +117,18 @@ def setup_dask_client(n_workers=None, threads_per_worker=None, memory_limit=None
 def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
     """
     Builds the data path in a portable way, relative to the script.
+    Uses the new ticker-based directory structure with backward compatibility.
     """
-    # Tenta encontrar a raiz do projeto subindo dois níveis (src/features -> raiz)
-    project_root = Path(__file__).resolve().parent.parent.parent
+    # Encontra a raiz do projeto subindo três níveis (src/features/bars -> raiz)
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
 
-    # Se o diretório 'data' não for encontrado, usa um caminho alternativo
+    # Usa o diretório 'data' na raiz do projeto
     data_dir = project_root / 'data'
-    if not data_dir.exists():
-        data_dir = Path.home() / "Desktop/hub/trading/ldp-finance/data"
 
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+
+    # Usa a estrutura de compatibilidade com symlinks
     if data_type == 'spot':
         return data_dir / f'dataset-raw-{granularity}-compressed-optimized' / 'spot'
     else:
@@ -110,6 +138,7 @@ def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
 def read_parquet_files_optimized(raw_dataset_path, file):
     """
     Reads Parquet files in an optimized way, selecting columns and types.
+    Uses larger block size to reduce number of partitions and overhead.
     """
     parquet_pattern = os.path.join(raw_dataset_path, file)
     df_dask = dd.read_parquet(
@@ -121,7 +150,10 @@ def read_parquet_files_optimized(raw_dataset_path, file):
             'qty': 'float32',
             'quoteQty': 'float32',
             'isBuyerMaker': 'bool'
-        }
+        },
+        blocksize='512MB',  # Partições maiores = menos overhead
+        aggregate_files=True,  # Agrupa arquivos pequenos
+        split_row_groups=False,  # Não divide row groups (mais estável)
     )
     return df_dask
 
@@ -152,28 +184,30 @@ def apply_operations_optimized(df_dask, meta):
     # Assinatura de Retorno: (Lista de Barras, Estado Final do Sistema)
     types.Tuple((
         # 1. Lista de Barras: cada barra é uma tupla de 12 elementos
+        # start_time(int64), end_time(int64), open, high, low, close, theta_k, buy_vol, total_vol_usd, total_vol, ticks, ticks_buy
         types.ListType(types.Tuple((
-            types.float64, types.float64, types.float64, types.float64,
+            types.int64, types.int64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64
         ))),
         # 2. Estado Final do Sistema: uma tupla com 12 elementos
+        # bar_open, high, low, close, start_time(int64), end_time(int64), imbalance, buy_vol, total_vol_usd, total_vol, ticks, ticks_buy
         types.Tuple((
             types.float64, types.float64, types.float64, types.float64,
-            types.float64, types.float64, types.float64, types.float64,
+            types.int64, types.int64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64
         )),
     ))(
         # Assinaturas dos Argumentos de Entrada
         types.float64[:],       # prices
-        types.float64[:],       # times
+        types.int64[:],         # times (agora int64 - timestamps em milissegundos)
         types.float64[:],       # net_volumes
         types.int8[:],          # sides
         types.float64[:],       # qtys
         # Estado do sistema (12 elementos)
         types.Tuple((
             types.float64, types.float64, types.float64, types.float64,
-            types.float64, types.float64, types.float64, types.float64,
+            types.int64, types.int64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64
         )),
         types.float64           # init_vol (limiar fixo)
@@ -221,7 +255,7 @@ def process_partition_numba(
 
             # Reseta o estado para a próxima barra
             bar_open, bar_high, bar_low, bar_close = np.nan, -np.inf, np.inf, np.nan
-            bar_start_time, bar_end_time = np.nan, np.nan
+            bar_start_time, bar_end_time = 0, 0  # int64: 0 indica sem valor
             current_imbalance, buy_volume_usd, total_volume_usd, total_volume, ticks, ticks_buy = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     final_state = (
@@ -238,7 +272,8 @@ def process_partition_numba(
 def create_dollar_bars_numba(partition, system_state, init_vol):
     """Função wrapper para processar uma partição com Numba."""
     prices = partition['price'].values.astype(np.float64)
-    times = partition['time'].values.astype(np.float64)
+    # Converte datetime64[ms] para timestamp em milissegundos (int64)
+    times = partition['time'].values.astype('datetime64[ms]').astype(np.int64)
     net_volumes = partition['net_volumes'].values.astype(np.float64)
     sides = partition['side'].values.astype(np.int8)
     qtys = partition['qty'].values.astype(np.float64)
@@ -260,18 +295,38 @@ def create_dollar_bars_numba(partition, system_state, init_vol):
     return df_bars, system_state
 
 
-def batch_create_dollar_bars_optimized(df_dask, system_state, init_vol):
-    """Processes partitions in batch to create bars."""
+def batch_create_dollar_bars_optimized(df_dask, system_state, init_vol, max_retries=3):
+    """Processes partitions in batch to create bars with retry logic."""
     results = []
+    failed_partitions = []
+
     for partition_num in range(df_dask.npartitions):
         logging.info(f'Processing partition {partition_num + 1} de {df_dask.npartitions}')
-        part = df_dask.get_partition(partition_num).compute()
 
-        bars, system_state = create_dollar_bars_numba(
-            part, system_state, init_vol
-        )
-        if not bars.empty:
-            results.append(bars)
+        # Retry logic para partições que falham
+        for attempt in range(max_retries):
+            try:
+                part = df_dask.get_partition(partition_num).compute()
+
+                bars, system_state = create_dollar_bars_numba(
+                    part, system_state, init_vol
+                )
+                if not bars.empty:
+                    results.append(bars)
+                break  # Sucesso, sai do loop de retry
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logging.warning(f'⚠️ Partition {partition_num + 1} failed (attempt {attempt + 1}/{max_retries}): {e}')
+                    logging.info(f'🔄 Retrying partition {partition_num + 1}...')
+                    gc.collect()  # Força garbage collection antes de tentar novamente
+                    time.sleep(2)  # Aguarda um pouco antes de tentar novamente
+                else:
+                    logging.error(f'❌ Partition {partition_num + 1} failed after {max_retries} attempts: {e}')
+                    failed_partitions.append(partition_num + 1)
+
+    if failed_partitions:
+        logging.warning(f'⚠️ {len(failed_partitions)} partitions failed: {failed_partitions}')
 
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame(), system_state
 
@@ -309,10 +364,11 @@ def process_files_and_generate_bars(
     output_file_prefix_parquet = f'{timestamp}-standart-{data_type}-volume{init_vol}'
 
     # O estado inicial agora tem 12 elementos, sem ewma_T, ewma_imbalance e warm
+    # start_time e end_time agora são int64 (0 indica sem valor)
     system_state = (
-        np.nan, -np.inf, np.inf, np.nan, np.nan, np.nan, # bar_open, high, low, close, start_time, end_time (6)
-        0.0, 0.0, 0.0, 0.0,                            # current_imbalance, buy_volume_usd, total_volume_usd, total_volume (4)
-        0.0, 0.0                                       # ticks, ticks_buy (2)
+        np.nan, -np.inf, np.inf, np.nan, 0, 0,  # bar_open, high, low, close, start_time(int64), end_time(int64) (6)
+        0.0, 0.0, 0.0, 0.0,                     # current_imbalance, buy_volume_usd, total_volume_usd, total_volume (4)
+        0.0, 0.0                                # ticks, ticks_buy (2)
     )
 
     results = []
@@ -332,7 +388,9 @@ def process_files_and_generate_bars(
             results.append(bars)
             if db_engine:
                 bars_to_db = bars.copy()
-                bars_to_db['end_time'] = pd.to_datetime(bars_to_db['end_time'], unit='ns')
+                # Converte timestamps de milissegundos para datetime
+                bars_to_db['end_time'] = pd.to_datetime(bars_to_db['end_time'], unit='ms')
+                bars_to_db['start_time'] = pd.to_datetime(bars_to_db['start_time'], unit='ms')
                 bars_to_db.drop(columns=['start_time'], inplace=True)
                 bars_to_db['type'] = 'Standard'
                 bars_to_db['sample_date'] = timestamp
@@ -354,7 +412,9 @@ def process_files_and_generate_bars(
 
     if results:
         all_bars = pd.concat(results, ignore_index=True)
-        all_bars['end_time'] = pd.to_datetime(all_bars['end_time'], unit='ns')
+        # Converte timestamps de milissegundos para datetime
+        all_bars['end_time'] = pd.to_datetime(all_bars['end_time'], unit='ms')
+        all_bars['start_time'] = pd.to_datetime(all_bars['start_time'], unit='ms')
         all_bars.drop(columns=['start_time'], inplace=True)
 
         final_path = output_dir / f'{output_file_prefix_parquet}.parquet'
@@ -369,7 +429,8 @@ if __name__ == '__main__':
     output_dir = './output/standart/'
 
     setup_logging()
-    client = setup_dask_client(n_workers=10, threads_per_worker=1, memory_limit='6GB')
+    # Usa detecção automática para otimizar uso de CPU e memória
+    client = setup_dask_client()
 
     # Uncomment the line below to enable database writing
     # engine = create_engine(db_url)
