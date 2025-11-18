@@ -21,6 +21,7 @@ from src.data_pipeline.converters.zip_to_parquet_streamer import ZipToParquetStr
 from src.data_pipeline.processors.parquet_optimizer import main as optimize_main
 from src.data_pipeline.validators.missing_dates_validator import main as missing_dates_main
 from src.features.bars.imbalance_bars import main as imbalance_main
+from src.features.bars.standard_dollar_bars import process_files_and_generate_bars, setup_logging as setup_standard_logging
 
 
 def setup_logging():
@@ -2558,36 +2559,38 @@ def run_feature_generation(config: PipelineConfig):
 
         print(f"📊 Using volume threshold: {volume_threshold:,} USD")
 
+        # Ask if user wants to use pipeline mode
+        pipeline_input = input("\n⚡ Enable pipeline mode for faster processing? (y/n, default: y): ").strip().lower()
+        use_pipeline = pipeline_input != 'n'  # Default is True (yes)
+
+        if use_pipeline:
+            print("🚀 Using HYBRID PIPELINE mode (3-stage: I/O → Pre-process → Generate)")
+        else:
+            print("📝 Using SEQUENTIAL mode (simple, stable)")
+
         try:
-            import sys
             from pathlib import Path
-            sys.path.append(str(Path(__file__).parent / "src" / "features" / "bars"))
-            from standard_dollar_bars import process_files_and_generate_bars, setup_logging, setup_dask_client
 
             # Setup for standard bars
-            setup_logging()
+            setup_standard_logging()
             output_dir = Path('./output/standard/')
 
-            # Start Dask client with automatic CPU optimization
-            client = setup_dask_client()  # Uses automatic detection to maximize CPU
+            # Generate standard bars using PyArrow (no Dask needed)
+            process_files_and_generate_bars(
+                data_type=config.data_type,
+                futures_type=config.futures_type if config.data_type == 'futures' else 'um',
+                granularity=config.granularity,
+                init_vol=volume_threshold,
+                output_dir=output_dir,
+                db_engine=None,
+                use_pipeline=use_pipeline
+            )
+            print("\n✅ Standard Dollar Bars generation completed!")
 
-            try:
-                # Generate standard bars
-                process_files_and_generate_bars(
-                    data_type=config.data_type,
-                    futures_type=config.futures_type if config.data_type == 'futures' else 'um',
-                    granularity=config.granularity,
-                    init_vol=volume_threshold,
-                    output_dir=output_dir,
-                    db_engine=None
-                )
-                print("✅ Standard Dollar Bars generation completed!")
-            finally:
-                client.close()
-                import gc
-                gc.collect()
         except Exception as e:
-            print(f"❌ Standard Dollar Bars generation failed: {e}")
+            print(f"\n❌ Standard Dollar Bars generation failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     elif choice == "2":
         print("\n🔄 Generating Imbalance Dollar Bars...")
@@ -2749,8 +2752,19 @@ Examples:
 
     # Features command
     features_parser = subparsers.add_parser('features', help='Generate features')
-    features_parser.add_argument('--type', choices=['imbalance'], default='imbalance',
+    features_parser.add_argument('--type', choices=['standard', 'imbalance'], default='imbalance',
                                 help='Type of features to generate')
+    features_parser.add_argument('--volume', type=int, default=40_000_000,
+                                help='Volume threshold in USD (for standard bars, default: 40,000,000)')
+    features_parser.add_argument('--symbol', default='BTCUSDT', help='Trading pair symbol')
+    features_parser.add_argument('--data-type', choices=['spot', 'futures'], default='futures',
+                                help='Data type (spot or futures)')
+    features_parser.add_argument('--futures-type', choices=['um', 'cm'], default='um',
+                                help='Futures type (um=USD-M, cm=COIN-M)')
+    features_parser.add_argument('--granularity', choices=['daily', 'monthly'], default='daily',
+                                help='Data granularity')
+    features_parser.add_argument('--pipeline', action='store_true',
+                                help='Enable pipeline mode for faster processing (standard bars only)')
 
     args = parser.parse_args()
 
@@ -2828,6 +2842,35 @@ Examples:
     elif args.command == 'features':
         if args.type == 'imbalance':
             imbalance_main()
+        elif args.type == 'standard':
+            print(f"\n📊 Generating Standard Dollar Bars...")
+            print(f"   Symbol: {args.symbol}")
+            print(f"   Data Type: {args.data_type}")
+            print(f"   Futures Type: {args.futures_type}")
+            print(f"   Granularity: {args.granularity}")
+            print(f"   Volume Threshold: {args.volume:,} USD")
+            print(f"   Pipeline Mode: {'Enabled' if args.pipeline else 'Disabled'}")
+
+            try:
+                from pathlib import Path
+
+                setup_standard_logging()
+                output_dir = Path('./output/standard/')
+
+                process_files_and_generate_bars(
+                    data_type=args.data_type,
+                    futures_type=args.futures_type,
+                    granularity=args.granularity,
+                    init_vol=args.volume,
+                    output_dir=output_dir,
+                    db_engine=None,
+                    use_pipeline=args.pipeline
+                )
+                print("\n✅ Standard Dollar Bars generation completed!")
+            except Exception as e:
+                print(f"\n❌ Standard Dollar Bars generation failed: {e}")
+                import traceback
+                traceback.print_exc()
     else:
         parser.print_help()
 

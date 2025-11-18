@@ -459,7 +459,7 @@ def process_files_and_generate_bars(
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     output_file_prefix = f'{data_type}-volume{init_vol}'
-    output_file_prefix_parquet = f'{timestamp}-standart-{data_type}-volume{init_vol}'
+    output_file_prefix_parquet = f'{timestamp}-standard-{data_type}-volume{init_vol}'
 
     # O estado inicial agora tem 12 elementos, sem ewma_T, ewma_imbalance e warm
     # start_time e end_time agora são int64 (0 indica sem valor)
@@ -524,7 +524,7 @@ if __name__ == '__main__':
     data_type = 'futures'
     futures_type = 'um'
     granularity = 'daily'
-    output_dir = './output/standart/'
+    output_dir = './output/standard/'
 
     # PERFORMANCE OPTIONS:
     # use_pipeline=False: Simple sequential processing (default, stable)
