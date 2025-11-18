@@ -90,3 +90,6 @@ Thumbs.db
 
 # Folder
 documentation
+
+# Claude Code
+.claude/

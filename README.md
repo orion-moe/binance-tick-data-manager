@@ -1,127 +1,127 @@
 # Binance Tick Data Manager
 
-Pipeline de alta performance para download e processamento de dados de criptomoedas em arquivos Parquet para machine learning.
+High-performance pipeline for downloading and processing cryptocurrency data into Parquet files for machine learning.
 
 ## Quick Start
 
-### 1. Instalação
+### 1. Installation
 
 ```bash
-# Criar ambiente virtual
+# Create virtual environment
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# Instalar dependências
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Executar Pipeline
+### 2. Run Pipeline
 
 ```bash
-# Modo interativo (recomendado)
+# Interactive mode (recommended)
 python main.py
 ```
 
-## Pipeline - Etapas
+## Pipeline Steps
 
-O pipeline é executado em etapas sequenciais:
+The pipeline runs in sequential steps:
 
-### Etapa 1: Download
-- Download de ZIPs históricos da Binance
-- Verificação de checksum automática
-- Suporte a Spot e Futures (USD-M / COIN-M)
-- Progresso salvo em `download_progress_daily.json`
+### Step 1: Download
+- Download historical ZIPs from Binance
+- Automatic checksum verification
+- Support for Spot and Futures (USD-M / COIN-M)
+- Progress saved in `download_progress_daily.json`
 
-### Etapa 2: Conversão
-Duas opções disponíveis:
-- **Legacy**: ZIP → CSV → Parquet (mais lento, usa mais disco)
-- **Otimizado**: ZIP → Parquet direto (streaming, recomendado)
+### Step 2: Conversion
+Two options available:
+- **Legacy**: ZIP → CSV → Parquet (slower, uses more disk)
+- **Optimized**: ZIP → Parquet direct (streaming, recommended)
 
-### Etapa 3: Merge/Otimização
-- Agrupa arquivos Parquet diários em arquivos maiores (~10GB)
-- Compressão Snappy para melhor performance
-- Limpeza automática dos arquivos intermediários
+### Step 3: Merge/Optimization
+- Groups daily Parquet files into larger files (~10GB)
+- Snappy compression for better performance
+- Automatic cleanup of intermediate files
 
-### Etapa 4: Validação
-- Verificação de datas faltantes
-- Validação de integridade dos arquivos Parquet
-- Detecção de arquivos corrompidos
+### Step 4: Validation
+- Missing dates verification
+- Parquet file integrity validation
+- Corrupted file detection
 
-### Etapa 5: Features
-Geração de barras alternativas para ML:
-- **Standard Dollar Bars**: Barras por volume em dólares fixo
-- **Imbalance Dollar Bars**: Barras adaptativas baseadas em desequilíbrio
+### Step 5: Features
+Alternative bar generation for ML:
+- **Standard Dollar Bars**: Bars by fixed dollar volume
+- **Imbalance Dollar Bars**: Adaptive bars based on imbalance
 
-## Estrutura de Diretórios
+## Directory Structure
 
 ```
 binance-tick-data-manager/
-├── main.py                    # Entry point principal
+├── main.py                    # Main entry point
 ├── src/
 │   ├── data_pipeline/         # ETL modules
-│   │   ├── downloaders/       # Download da Binance
-│   │   ├── extractors/        # Extração CSV
-│   │   ├── converters/        # Conversão para Parquet
-│   │   ├── processors/        # Merge e otimização
-│   │   ├── validators/        # Validação de dados
-│   │   └── utils/             # Utilitários
+│   │   ├── downloaders/       # Binance download
+│   │   ├── extractors/        # CSV extraction
+│   │   ├── converters/        # Parquet conversion
+│   │   ├── processors/        # Merge and optimization
+│   │   ├── validators/        # Data validation
+│   │   └── utils/             # Utilities
 │   ├── features/              # Feature engineering
-│   │   └── bars/              # Geração de barras
-│   └── scripts/               # Scripts auxiliares
-├── data/                      # Dados (por ticker)
+│   │   └── bars/              # Bar generation
+│   └── scripts/               # Helper scripts
+├── data/                      # Data (per ticker)
 │   ├── btcusdt-spot/
-│   │   ├── raw-zip-daily/            # ZIPs baixados
-│   │   ├── raw-parquet-daily/        # Parquets individuais
-│   │   ├── raw-parquet-merged-daily/ # Parquets merged (~10GB)
-│   │   ├── output/                   # Features geradas
-│   │   └── logs/                     # Logs locais
+│   │   ├── raw-zip-daily/            # Downloaded ZIPs
+│   │   ├── raw-parquet-daily/        # Individual Parquets
+│   │   ├── raw-parquet-merged-daily/ # Merged Parquets (~10GB)
+│   │   ├── output/                   # Generated features
+│   │   └── logs/                     # Local logs
 │   ├── btcusdt-futures-um/           # Futures USD-M
-│   └── logs/                         # Logs globais
-├── output/                    # Features (organizado por ticker)
-└── notebooks/                 # Análises exploratórias
+│   └── logs/                         # Global logs
+├── output/                    # Features (organized by ticker)
+└── notebooks/                 # Exploratory analysis
 ```
 
-## Funcionalidades Implementadas
+## Implemented Features
 
-| Feature | Status | Descrição |
-|---------|--------|-----------|
-| Download com checksum | ✅ | Verificação SHA256 automática |
-| Suporte Spot | ✅ | Dados de mercado spot |
-| Suporte Futures | ✅ | USD-M e COIN-M |
-| ZIP → Parquet streaming | ✅ | Conversão otimizada sem CSV intermediário |
-| Merge de Parquets | ✅ | Agrupa em arquivos ~10GB |
-| Validação de datas | ✅ | Detecta gaps nos dados |
-| Standard Dollar Bars | ✅ | Barras por volume fixo em dólares |
-| Imbalance Dollar Bars | ✅ | Barras adaptativas por desequilíbrio |
-| Progress tracking | ✅ | Retoma downloads interrompidos |
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Download with checksum | ✅ | Automatic SHA256 verification |
+| Spot support | ✅ | Spot market data |
+| Futures support | ✅ | USD-M and COIN-M |
+| ZIP → Parquet streaming | ✅ | Optimized conversion without intermediate CSV |
+| Parquet merge | ✅ | Groups into ~10GB files |
+| Date validation | ✅ | Detects data gaps |
+| Standard Dollar Bars | ✅ | Bars by fixed dollar volume |
+| Imbalance Dollar Bars | ✅ | Adaptive bars by imbalance |
+| Progress tracking | ✅ | Resumes interrupted downloads |
 
-## Em Desenvolvimento
+## In Development
 
-| Feature | Status | Descrição |
-|---------|--------|-----------|
-| Imbalance Bars (tick) | 🔄 | Barras por desequilíbrio de ticks |
-| Testes unitários | ⬜ | Suite de testes automatizados |
-| Tick Bars | ⬜ | Barras por número de ticks |
-| Volume Bars | ⬜ | Barras por volume de contratos |
-| CLI arguments | ⬜ | Execução por linha de comando |
-| Modelos ML | ⬜ | Integração com frameworks de ML |
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Imbalance Bars (tick) | 🔄 | Bars by tick imbalance |
+| Unit tests | ⬜ | Automated test suite |
+| Tick Bars | ⬜ | Bars by tick count |
+| Volume Bars | ⬜ | Bars by contract volume |
+| CLI arguments | ⬜ | Command-line execution |
+| ML models | ⬜ | ML framework integration |
 
-## Uso dos Dados
+## Data Usage
 
-### Leitura de Parquet
+### Reading Parquet
 
 ```python
 import pandas as pd
 
-# Arquivo único
+# Single file
 df = pd.read_parquet("data/btcusdt-spot/raw-parquet-merged-daily/merged_part_0.parquet")
 
-# Múltiplos arquivos com Dask (arquivos maiores que RAM)
+# Multiple files with Dask (files larger than RAM)
 import dask.dataframe as dd
 df = dd.read_parquet("data/btcusdt-spot/raw-parquet-merged-daily/*.parquet")
 ```
 
-### Leitura de Dollar Bars
+### Reading Dollar Bars
 
 ```python
 import pandas as pd
@@ -133,28 +133,28 @@ df = pd.read_parquet("data/btcusdt-spot/output/standard_dollar_bars.parquet")
 df = pd.read_parquet("output/btcusdt-spot/imbalance_dollar_bars.parquet")
 ```
 
-## Requisitos
+## Requirements
 
 - Python 3.8+
-- ~10GB espaço em disco por ano de dados
-- Conexão com internet para download da Binance
+- ~10GB disk space per year of data
+- Internet connection for Binance download
 
-## Arquitetura
+## Architecture
 
-### Princípios de Design
+### Design Principles
 
-- **Simples**: Sem Docker, databases ou infraestrutura complexa
-- **Rápido**: Parquet files para 10x melhor performance que CSV
-- **Confiável**: Verificação de checksum e validação de dados
-- **Resumível**: Tracking de progresso para operações interrompidas
-- **Organizado**: Cada ticker em seu próprio diretório
+- **Simple**: No Docker, databases, or complex infrastructure
+- **Fast**: Parquet files for 10x better performance than CSV
+- **Reliable**: Checksum verification and data validation
+- **Resumable**: Progress tracking for interrupted operations
+- **Organized**: Each ticker in its own directory
 
-### Tecnologias
+### Technologies
 
-- **PyArrow**: Leitura/escrita de Parquet
-- **Dask**: Processamento de arquivos maiores que RAM
-- **Pandas**: Manipulação de DataFrames
-- **httpx**: Downloads HTTP async
+- **PyArrow**: Parquet read/write
+- **Dask**: Processing files larger than RAM
+- **Pandas**: DataFrame manipulation
+- **httpx**: Async HTTP downloads
 
 ## License
 
