@@ -16,11 +16,9 @@ import gc
 
 import numpy as np
 import pandas as pd
-import dask.dataframe as dd
 
 from numba import njit, types
 from numba.typed import List
-from dask.distributed import Client, LocalCluster
 
 from sqlalchemy import create_engine
 
@@ -45,74 +43,12 @@ def setup_logging():
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
 
-def setup_dask_client(n_workers=None, threads_per_worker=None, memory_limit=None):
-    """Configura o cliente Dask para processamento distribuído com otimização automática de CPU."""
-    import psutil
-    import multiprocessing
-
-    # Detecta automaticamente o número de CPUs
-    cpu_count = multiprocessing.cpu_count()
-    available_memory = psutil.virtual_memory().available / (1024**3)  # Em GB
-
-    # Se não especificado, usa configuração otimizada CONSERVADORA
-    if n_workers is None:
-        # Usa menos workers para evitar contenção (1/3 dos cores, min 2, max 6)
-        # Menos workers = mais memória por worker = menos crashes
-        n_workers = max(min(cpu_count // 3, 6), 2)
-
-    if threads_per_worker is None:
-        # Usa apenas 1 thread por worker para evitar race conditions
-        # Processamento sequencial é mais estável para operações pesadas
-        threads_per_worker = 1
-
-    if memory_limit is None:
-        # Uses 60% da memória disponível dividida entre workers (ainda mais conservador)
-        # Deixa 40% livre para sistema operacional e cache de disco
-        memory_per_worker = (available_memory * 0.6) / n_workers
-        memory_limit = f'{memory_per_worker:.1f}GB'
-
-    logging.info(f"🖥️ CPUs detectadas: {cpu_count}")
-    logging.info(f"💾 Memória disponível: {available_memory:.1f} GB")
-    logging.info(f"⚙️ Configuração Dask: {n_workers} workers × {threads_per_worker} threads = {n_workers * threads_per_worker} threads totais")
-    logging.info(f"📊 Memória por worker: {memory_limit}")
-
-    cluster = LocalCluster(
-        n_workers=n_workers,
-        threads_per_worker=threads_per_worker,
-        memory_limit=memory_limit,
-        processes=True,  # Uses processos separados para melhor paralelismo
-        silence_logs=logging.ERROR,  # Reduz logs do Dask para melhorar performance
-        # Configurações adicionais para estabilidade
-        death_timeout=600,  # Tempo para considerar worker morto (10 min - aumentado)
-        lifetime='30 minutes',  # Recria workers a cada 30 min para evitar memory leaks
-        lifetime_stagger='5 minutes',  # Stagger para não recriar todos ao mesmo tempo
-    )
-
-    # Configurações de resiliência
-    import dask
-    dask.config.set({
-        'distributed.scheduler.allowed-failures': 5,  # Permite 5 falhas antes de desistir
-        'distributed.comm.timeouts.connect': '300s',  # Timeout de conexão
-        'distributed.comm.timeouts.tcp': '300s',  # Timeout TCP
-        'distributed.scheduler.work-stealing': False,  # DESABILITA work stealing (causa deadlocks)
-        'distributed.worker.memory.target': 0.75,  # Começa a liberar memória em 75%
-        'distributed.worker.memory.spill': 0.85,  # Spill to disk em 85%
-        'distributed.worker.memory.pause': 0.90,  # Pausa worker em 90%
-        'distributed.worker.memory.terminate': 0.98,  # Termina worker em 98%
-    })
-
-    client = Client(
-        cluster,
-        # Timeouts aumentados para evitar erros de coleta
-        timeout='600s',  # Timeout para operações de rede (aumentado para 10 min)
-        heartbeat_interval='60s',  # Intervalo de heartbeat (reduzido overhead)
-    )
-
-    # Otimizações adicionais
-    client.run(lambda: __import__('gc').collect())  # Força garbage collection em todos workers
-
-    logging.info(f"✅ Dask client otimizado inicializado: {client}")
-    return client
+# DEPRECATED: This function is no longer used
+# We now use PyArrow's chunked reading instead of Dask for better memory efficiency
+#
+# def setup_dask_client(n_workers=None, threads_per_worker=None, memory_limit=None):
+#     """Configura o cliente Dask para processamento distribuído com otimização automática de CPU."""
+#     ...
 
 def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
     """
@@ -135,27 +71,36 @@ def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
         return data_dir / f'dataset-raw-{granularity}-compressed-optimized' / f'futures-{futures_type}'
 
 
-def read_parquet_files_optimized(raw_dataset_path, file):
+def read_parquet_in_chunks(file_path, chunk_size=50_000_000):
     """
-    Reads Parquet files in an optimized way, selecting columns and types.
-    Uses larger block size to reduce number of partitions and overhead.
+    Reads a Parquet file in memory-efficient chunks using PyArrow.
+    Returns an iterator of pandas DataFrames.
+
+    Args:
+        file_path: Path to the Parquet file
+        chunk_size: Number of rows per chunk (default: 50M rows ≈ 1-2GB RAM)
+
+    Yields:
+        pandas DataFrame chunks
     """
-    parquet_pattern = os.path.join(raw_dataset_path, file)
-    df_dask = dd.read_parquet(
-        parquet_pattern,
-        columns=['price', 'qty', 'quoteQty', 'time', 'isBuyerMaker'],
-        engine='pyarrow',
-        dtype={
-            'price': 'float32',
-            'qty': 'float32',
-            'quoteQty': 'float32',
-            'isBuyerMaker': 'bool'
-        },
-        blocksize='512MB',  # Partições maiores = menos overhead
-        aggregate_files=True,  # Agrupa arquivos pequenos
-        split_row_groups=False,  # Não divide row groups (mais estável)
-    )
-    return df_dask
+    import pyarrow.parquet as pq
+
+    # Open the Parquet file
+    parquet_file = pq.ParquetFile(file_path)
+
+    # Read in batches
+    for batch in parquet_file.iter_batches(
+        batch_size=chunk_size,
+        columns=['price', 'qty', 'quoteQty', 'time', 'isBuyerMaker']
+    ):
+        # Convert to pandas with optimized dtypes
+        df = batch.to_pandas()
+        df['price'] = df['price'].astype('float32')
+        df['qty'] = df['qty'].astype('float32')
+        df['quoteQty'] = df['quoteQty'].astype('float32')
+        df['isBuyerMaker'] = df['isBuyerMaker'].astype('bool')
+
+        yield df
 
 def process_partition_data(df):
     """
@@ -168,13 +113,6 @@ def process_partition_data(df):
     df['side'] = df['side'].ffill().fillna(1).astype('int8')
     df['net_volumes'] = df['quoteQty'] * df['side']
     return df
-
-
-def apply_operations_optimized(df_dask, meta):
-    """
-    Aplica as operações de processamento em cada partição do Dask DataFrame.
-    """
-    return df_dask.map_partitions(process_partition_data, meta=meta)
 
 # ==============================================================================
 # SEÇÃO DO ALGORITMO DE GERAÇÃO DE BARRAS (NUMBA)
@@ -295,38 +233,48 @@ def create_dollar_bars_numba(partition, system_state, init_vol):
     return df_bars, system_state
 
 
-def batch_create_dollar_bars_optimized(df_dask, system_state, init_vol, max_retries=3):
-    """Processes partitions in batch to create bars with retry logic."""
+def process_file_in_chunks(file_path, system_state, init_vol, chunk_size=50_000_000):
+    """
+    Processes a single Parquet file in memory-efficient chunks.
+
+    Args:
+        file_path: Path to the Parquet file
+        system_state: Current state of the bar generation system
+        init_vol: Volume threshold for bar generation
+        chunk_size: Rows per chunk (default: 50M rows ≈ 1-2GB RAM)
+
+    Returns:
+        Tuple of (bars_dataframe, final_system_state)
+    """
     results = []
-    failed_partitions = []
+    chunk_num = 0
 
-    for partition_num in range(df_dask.npartitions):
-        logging.info(f'Processing partition {partition_num + 1} de {df_dask.npartitions}')
+    for chunk in read_parquet_in_chunks(file_path, chunk_size):
+        chunk_num += 1
+        logging.info(f'  └─ Processing chunk {chunk_num} ({len(chunk):,} rows)')
 
-        # Retry logic para partições que falham
-        for attempt in range(max_retries):
-            try:
-                part = df_dask.get_partition(partition_num).compute()
+        try:
+            # Process data: add side and net_volumes columns
+            chunk = process_partition_data(chunk)
 
-                bars, system_state = create_dollar_bars_numba(
-                    part, system_state, init_vol
-                )
-                if not bars.empty:
-                    results.append(bars)
-                break  # Sucesso, sai do loop de retry
+            # Generate bars using Numba
+            bars, system_state = create_dollar_bars_numba(
+                chunk, system_state, init_vol
+            )
 
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logging.warning(f'⚠️ Partition {partition_num + 1} failed (attempt {attempt + 1}/{max_retries}): {e}')
-                    logging.info(f'🔄 Retrying partition {partition_num + 1}...')
-                    gc.collect()  # Força garbage collection antes de tentar novamente
-                    time.sleep(2)  # Aguarda um pouco antes de tentar novamente
-                else:
-                    logging.error(f'❌ Partition {partition_num + 1} failed after {max_retries} attempts: {e}')
-                    failed_partitions.append(partition_num + 1)
+            if not bars.empty:
+                results.append(bars)
+                logging.info(f'     Generated {len(bars)} bars from chunk {chunk_num}')
 
-    if failed_partitions:
-        logging.warning(f'⚠️ {len(failed_partitions)} partitions failed: {failed_partitions}')
+            # Force garbage collection after each chunk
+            del chunk
+            gc.collect()
+
+        except Exception as e:
+            logging.error(f'❌ Error processing chunk {chunk_num}: {e}')
+            import traceback
+            logging.error(traceback.format_exc())
+            continue
 
     return pd.concat(results, ignore_index=True) if results else pd.DataFrame(), system_state
 
@@ -352,13 +300,6 @@ def process_files_and_generate_bars(
         return
     logging.info(f"Found {len(files)} Parquet files")
 
-    meta = pd.DataFrame({
-        'price': pd.Series(dtype='float32'), 'qty': pd.Series(dtype='float32'),
-        'quoteQty': pd.Series(dtype='float32'), 'time': pd.Series(dtype='int64'),
-        'isBuyerMaker': pd.Series(dtype='bool'), 'side': pd.Series(dtype='int8'),
-        'net_volumes': pd.Series(dtype='float64')
-    })
-
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     output_file_prefix = f'{data_type}-volume{init_vol}'
     output_file_prefix_parquet = f'{timestamp}-standart-{data_type}-volume{init_vol}'
@@ -377,11 +318,11 @@ def process_files_and_generate_bars(
         logging.info(f"Processing file {i + 1}/{len(files)}: {file}")
         start_time_file = time.time()
 
-        df_dask = read_parquet_files_optimized(str(raw_dataset_path), file)
-        df_dask = apply_operations_optimized(df_dask, meta)
+        file_path = raw_dataset_path / file
 
-        bars, system_state = batch_create_dollar_bars_optimized(
-            df_dask, system_state, init_vol
+        # Process file in memory-efficient chunks (no Dask needed)
+        bars, system_state = process_file_in_chunks(
+            file_path, system_state, init_vol, chunk_size=50_000_000
         )
 
         if not bars.empty:
@@ -429,8 +370,10 @@ if __name__ == '__main__':
     output_dir = './output/standart/'
 
     setup_logging()
-    # Usa detecção automática para otimizar uso de CPU e memória
-    client = setup_dask_client()
+
+    # NOTE: Dask is NO LONGER NEEDED for file reading
+    # We now use PyArrow's chunked reading which is more memory-efficient
+    # and doesn't require distributed workers
 
     # Uncomment the line below to enable database writing
     # engine = create_engine(db_url)
@@ -452,8 +395,6 @@ if __name__ == '__main__':
             logging.info("Forçando a coleta de lixo antes da próxima amostra...")
             gc.collect()
     finally:
-        logging.info("Fechando o cliente Dask.")
-        client.close()
         if engine is not None:
             logging.info("Disposing database engine.")
             engine.dispose()
