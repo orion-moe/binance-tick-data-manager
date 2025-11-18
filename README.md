@@ -1,91 +1,160 @@
-# Crypto ML Finance Pipeline
+# Binance Tick Data Manager
 
-A high-performance Python pipeline for downloading and processing cryptocurrency data into Parquet files for machine learning.
+Pipeline de alta performance para download e processamento de dados de criptomoedas em arquivos Parquet para machine learning.
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Instalação
 
 ```bash
-# Create virtual environment
+# Criar ambiente virtual
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# Install requirements
+# Instalar dependências
 pip install -r requirements.txt
 ```
 
-### 2. Run the Pipeline
+### 2. Executar Pipeline
 
 ```bash
-# Interactive mode (recommended)
+# Modo interativo (recomendado)
 python main.py
 ```
 
-### 3. Command Line Usage
+## Pipeline - Etapas
 
-```bash
-# Download data
-python main.py download --symbol BTCUSDT --type spot --granularity daily
+O pipeline é executado em etapas sequenciais:
 
-# Optimize parquet files
-python main.py optimize --source data/raw --target data/optimized
+### Etapa 1: Download
+- Download de ZIPs históricos da Binance
+- Verificação de checksum automática
+- Suporte a Spot e Futures (USD-M / COIN-M)
+- Progresso salvo em `download_progress_daily.json`
 
-# Validate data
-python main.py validate --symbol BTCUSDT
+### Etapa 2: Conversão
+Duas opções disponíveis:
+- **Legacy**: ZIP → CSV → Parquet (mais lento, usa mais disco)
+- **Otimizado**: ZIP → Parquet direto (streaming, recomendado)
 
-# Generate features (Imbalance Dollar Bars)
-python main.py features --type imbalance
+### Etapa 3: Merge/Otimização
+- Agrupa arquivos Parquet diários em arquivos maiores (~10GB)
+- Compressão Snappy para melhor performance
+- Limpeza automática dos arquivos intermediários
+
+### Etapa 4: Validação
+- Verificação de datas faltantes
+- Validação de integridade dos arquivos Parquet
+- Detecção de arquivos corrompidos
+
+### Etapa 5: Features
+Geração de barras alternativas para ML:
+- **Standard Dollar Bars**: Barras por volume em dólares fixo
+- **Imbalance Dollar Bars**: Barras adaptativas baseadas em desequilíbrio
+
+## Estrutura de Diretórios
+
+```
+binance-tick-data-manager/
+├── main.py                    # Entry point principal
+├── src/
+│   ├── data_pipeline/         # ETL modules
+│   │   ├── downloaders/       # Download da Binance
+│   │   ├── extractors/        # Extração CSV
+│   │   ├── converters/        # Conversão para Parquet
+│   │   ├── processors/        # Merge e otimização
+│   │   ├── validators/        # Validação de dados
+│   │   └── utils/             # Utilitários
+│   ├── features/              # Feature engineering
+│   │   └── bars/              # Geração de barras
+│   └── scripts/               # Scripts auxiliares
+├── data/                      # Dados (por ticker)
+│   ├── btcusdt-spot/
+│   │   ├── raw-zip-daily/            # ZIPs baixados
+│   │   ├── raw-parquet-daily/        # Parquets individuais
+│   │   ├── raw-parquet-merged-daily/ # Parquets merged (~10GB)
+│   │   ├── output/                   # Features geradas
+│   │   └── logs/                     # Logs locais
+│   ├── btcusdt-futures-um/           # Futures USD-M
+│   └── logs/                         # Logs globais
+├── output/                    # Features (organizado por ticker)
+└── notebooks/                 # Análises exploratórias
 ```
 
-## Data Structure
+## Funcionalidades Implementadas
 
-```
-data/
-├── raw-daily/                 # Downloaded ZIP files
-├── raw-daily-compressed/       # Converted Parquet files
-├── raw-daily-compressed-optimized/  # Optimized Parquet files
-└── logs/                       # Processing logs
-```
+| Feature | Status | Descrição |
+|---------|--------|-----------|
+| Download com checksum | ✅ | Verificação SHA256 automática |
+| Suporte Spot | ✅ | Dados de mercado spot |
+| Suporte Futures | ✅ | USD-M e COIN-M |
+| ZIP → Parquet streaming | ✅ | Conversão otimizada sem CSV intermediário |
+| Merge de Parquets | ✅ | Agrupa em arquivos ~10GB |
+| Validação de datas | ✅ | Detecta gaps nos dados |
+| Standard Dollar Bars | ✅ | Barras por volume fixo em dólares |
+| Imbalance Dollar Bars | ✅ | Barras adaptativas por desequilíbrio |
+| Progress tracking | ✅ | Retoma downloads interrompidos |
 
-## Features
+## Em Desenvolvimento
 
-- **Download** - Historical crypto data from Binance
-- **Convert** - ZIP → CSV → Parquet format
-- **Optimize** - Merge and compress Parquet files
-- **Validate** - Check for missing dates
-- **Generate** - Imbalance Dollar Bars (Lopez de Prado method)
+| Feature | Status | Descrição |
+|---------|--------|-----------|
+| Imbalance Bars (tick) | 🔄 | Barras por desequilíbrio de ticks |
+| Testes unitários | ⬜ | Suite de testes automatizados |
+| Tick Bars | ⬜ | Barras por número de ticks |
+| Volume Bars | ⬜ | Barras por volume de contratos |
+| CLI arguments | ⬜ | Execução por linha de comando |
+| Modelos ML | ⬜ | Integração com frameworks de ML |
 
-## Working with Parquet Files
+## Uso dos Dados
+
+### Leitura de Parquet
 
 ```python
 import pandas as pd
 
-# Read single file
-df = pd.read_parquet("data/BTCUSDT_2024.parquet")
+# Arquivo único
+df = pd.read_parquet("data/btcusdt-spot/raw-parquet-merged-daily/merged_part_0.parquet")
 
-# Read multiple files
+# Múltiplos arquivos com Dask (arquivos maiores que RAM)
 import dask.dataframe as dd
-df = dd.read_parquet("data/*.parquet")
+df = dd.read_parquet("data/btcusdt-spot/raw-parquet-merged-daily/*.parquet")
 ```
 
-## Requirements
+### Leitura de Dollar Bars
+
+```python
+import pandas as pd
+
+# Standard Dollar Bars
+df = pd.read_parquet("data/btcusdt-spot/output/standard_dollar_bars.parquet")
+
+# Imbalance Dollar Bars
+df = pd.read_parquet("output/btcusdt-spot/imbalance_dollar_bars.parquet")
+```
+
+## Requisitos
 
 - Python 3.8+
-- ~10GB disk space per year of data (Parquet format)
-- Internet connection for downloading from Binance
+- ~10GB espaço em disco por ano de dados
+- Conexão com internet para download da Binance
 
-## Documentation
+## Arquitetura
 
-📚 **Complete documentation available in [`documentation/`](documentation/)**
+### Princípios de Design
 
-- [INDEX.md](documentation/INDEX.md) - Documentation index
-- [DATA_STRUCTURE.md](documentation/DATA_STRUCTURE.md) - Directory structure and organization
-- [CPU_OPTIMIZATION.md](documentation/CPU_OPTIMIZATION.md) - Performance optimizations (6x faster!)
-- [CHECKSUM_VERIFICATION.md](documentation/CHECKSUM_VERIFICATION.md) - Data integrity verification
-- [PARQUET_COMPRESSION.md](documentation/PARQUET_COMPRESSION.md) - Compression details
+- **Simples**: Sem Docker, databases ou infraestrutura complexa
+- **Rápido**: Parquet files para 10x melhor performance que CSV
+- **Confiável**: Verificação de checksum e validação de dados
+- **Resumível**: Tracking de progresso para operações interrompidas
+- **Organizado**: Cada ticker em seu próprio diretório
 
-See [CLAUDE.md](CLAUDE.md) for architecture overview and design principles.
+### Tecnologias
+
+- **PyArrow**: Leitura/escrita de Parquet
+- **Dask**: Processamento de arquivos maiores que RAM
+- **Pandas**: Manipulação de DataFrames
+- **httpx**: Downloads HTTP async
 
 ## License
 

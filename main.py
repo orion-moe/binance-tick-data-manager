@@ -2559,31 +2559,27 @@ def run_feature_generation(config: PipelineConfig):
 
         print(f"📊 Using volume threshold: {volume_threshold:,} USD")
 
-        # Ask if user wants to use pipeline mode
-        pipeline_input = input("\n⚡ Enable pipeline mode for faster processing? (y/n, default: y): ").strip().lower()
-        use_pipeline = pipeline_input != 'n'  # Default is True (yes)
-
-        if use_pipeline:
-            print("🚀 Using HYBRID PIPELINE mode (3-stage: I/O → Pre-process → Generate)")
-        else:
-            print("📝 Using SEQUENTIAL mode (simple, stable)")
+        # Use pipeline mode by default for better performance
+        use_pipeline = True
+        print("🚀 Using HYBRID PIPELINE mode (3-stage: I/O → Pre-process → Generate)")
 
         try:
             from pathlib import Path
 
             # Setup for standard bars
             setup_standard_logging()
-            output_dir = Path('./output/standard/')
 
             # Generate standard bars using PyArrow (no Dask needed)
+            # Output will be saved to: output/{symbol}-{data_type}/standard/
             process_files_and_generate_bars(
                 data_type=config.data_type,
                 futures_type=config.futures_type if config.data_type == 'futures' else 'um',
                 granularity=config.granularity,
                 init_vol=volume_threshold,
-                output_dir=output_dir,
+                output_dir=None,  # Will auto-create based on ticker
                 db_engine=None,
-                use_pipeline=use_pipeline
+                use_pipeline=use_pipeline,
+                symbol=config.symbol
             )
             print("\n✅ Standard Dollar Bars generation completed!")
 
@@ -2852,19 +2848,18 @@ Examples:
             print(f"   Pipeline Mode: {'Enabled' if args.pipeline else 'Disabled'}")
 
             try:
-                from pathlib import Path
-
                 setup_standard_logging()
-                output_dir = Path('./output/standard/')
 
+                # Output will be saved to: output/{symbol}-{data_type}/standard/
                 process_files_and_generate_bars(
                     data_type=args.data_type,
                     futures_type=args.futures_type,
                     granularity=args.granularity,
                     init_vol=args.volume,
-                    output_dir=output_dir,
+                    output_dir=None,  # Will auto-create based on ticker
                     db_engine=None,
-                    use_pipeline=args.pipeline
+                    use_pipeline=args.pipeline,
+                    symbol=args.symbol
                 )
                 print("\n✅ Standard Dollar Bars generation completed!")
             except Exception as e:

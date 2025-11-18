@@ -47,7 +47,9 @@ failed_downloads.txt
 
 # Logs
 logs/
+**/logs/
 *.log
+pipeline_*.log
 
 # Reports
 reports/
@@ -85,3 +87,6 @@ Thumbs.db
 .env
 *.key
 *.pem
+
+# Folder
+documentation

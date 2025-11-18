@@ -77,10 +77,19 @@ def setup_logging():
 #     """Configura o cliente Dask para processamento distribuído com otimização automática de CPU."""
 #     ...
 
-def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
+def get_data_path(data_type='futures', futures_type='um', granularity='daily', symbol='BTCUSDT'):
     """
     Builds the data path in a portable way, relative to the script.
-    Uses the new ticker-based directory structure with backward compatibility.
+    Uses the new ticker-based directory structure.
+
+    Args:
+        data_type: Type of market data ('spot' or 'futures')
+        futures_type: Type of futures ('um' or 'cm')
+        granularity: Data granularity ('daily' or 'monthly')
+        symbol: Trading pair symbol (e.g., 'BTCUSDT')
+
+    Returns:
+        Path to the data directory containing parquet files
     """
     # Encontra a raiz do projeto subindo três níveis (src/features/bars -> raiz)
     project_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -91,11 +100,12 @@ def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
     if not data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
-    # Usa a estrutura de compatibilidade com symlinks
-    if data_type == 'spot':
-        return data_dir / f'dataset-raw-{granularity}-compressed-optimized' / 'spot'
-    else:
-        return data_dir / f'dataset-raw-{granularity}-compressed-optimized' / f'futures-{futures_type}'
+    # Build ticker-based path: data/btcusdt-spot/raw-parquet-merged-daily/
+    ticker_name = f"{symbol.lower()}-{data_type}"
+    if data_type == 'futures':
+        ticker_name = f"{symbol.lower()}-{data_type}-{futures_type}"
+
+    return data_dir / ticker_name / f'raw-parquet-merged-{granularity}'
 
 
 def read_parquet_in_chunks(file_path, chunk_size=50_000_000, use_async=False, prefetch_size=2):
@@ -432,19 +442,40 @@ def process_file_in_chunks(file_path, system_state, init_vol, chunk_size=50_000_
 
 def process_files_and_generate_bars(
     data_type='futures', futures_type='um', granularity='daily',
-    init_vol=40_000_000, output_dir=None, db_engine=None, use_pipeline=False
+    init_vol=40_000_000, output_dir=None, db_engine=None, use_pipeline=False,
+    symbol='BTCUSDT'
 ):
     """
     Função principal que orquestra todo o processo.
 
     Args:
+        data_type: Type of market data ('spot' or 'futures')
+        futures_type: Type of futures ('um' or 'cm')
+        granularity: Data granularity ('daily' or 'monthly')
+        init_vol: Volume threshold for bar generation
+        output_dir: Base output directory (will create ticker subdirectory)
+        db_engine: SQLAlchemy engine for database writing (optional)
         use_pipeline: Enable 3-stage pipeline for better performance (default: False)
-                     Pipeline stages: I/O (thread 1) → Pre-process (thread 2) → Generate bars (main)
+        symbol: Trading pair symbol (e.g., 'BTCUSDT')
     """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Build ticker-based output directory inside data/
+    # Example: data/btcusdt-futures-um/output/standard/
+    ticker_name = f"{symbol.lower()}-{data_type}"
+    if data_type == 'futures':
+        ticker_name = f"{symbol.lower()}-{data_type}-{futures_type}"
 
-    raw_dataset_path = get_data_path(data_type, futures_type, granularity)
+    # Find project root
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+
+    if output_dir is None:
+        output_dir = project_root / 'data' / ticker_name / 'output' / 'standard'
+    else:
+        output_dir = Path(output_dir) / ticker_name / 'output' / 'standard'
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Output directory: {output_dir}")
+
+    raw_dataset_path = get_data_path(data_type, futures_type, granularity, symbol)
     logging.info(f"Data path: {raw_dataset_path}")
 
     if not raw_dataset_path.exists():
