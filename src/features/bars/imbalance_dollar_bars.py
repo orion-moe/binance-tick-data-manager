@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Imbalance Dollar Bars Generator - Versão Integrada
+Imbalance Dollar Bars Generator - PyArrow Version
 
 This module generates "imbalance dollar bars" from Bitcoin trade data.
-Uses distributed processing with Dask and Numba optimizations to process
-large volumes of data efficiently.
+Uses PyArrow chunked reading and Numba optimizations for memory-efficient processing.
 """
 
 import os
-# import argparse
 import datetime
 import logging
 import time
@@ -17,146 +15,142 @@ import gc
 
 import numpy as np
 import pandas as pd
-import dask.dataframe as dd
+import pyarrow.parquet as pq
 
 from numba import njit, types
 from numba.typed import List
-from dask.distributed import Client, LocalCluster
 
 from sqlalchemy import create_engine
 
 # ==============================================================================
-# SEÇÃO DE FUNÇÕES UTILITÁRIAS INTEGRADAS
+# DATABASE CONFIGURATION
 # ==============================================================================
 
-# Pegando as credenciais do ambiente (ou defina diretamente para testar)
 host = 'localhost'
 port = '5432'
 dbname = 'superset'
 user = 'superset'
 password = 'superset'
 
-# Criar a URL de conexão para o SQLAlchemy
 db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-
 engine = create_engine(db_url)
 
 def setup_logging():
-    """Configura o sistema de logging."""
+    """Configure logging system."""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
 
-def setup_dask_client(n_workers=10, threads_per_worker=1, memory_limit='6GB'):
-    """Configura o cliente Dask para processamento distribuído."""
-    cluster = LocalCluster(n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
-    client = Client(cluster)
-    logging.info(f"Dask client inicializado: {client}")
-    return client
-
-def get_data_path(data_type='futures', futures_type='um', granularity='daily'):
+def get_data_path(data_type='futures', futures_type='um', granularity='daily', symbol='BTCUSDT'):
     """
     Builds the data path in a portable way, relative to the script.
-    """
-    project_root = Path(__file__).parent.parent.parent.parent  # Sobe 3 níveis: bars/ -> features/ -> src/ -> raiz
+    Uses the new ticker-based directory structure.
 
-    # Diretório de dados
+    Args:
+        data_type: Type of market data ('spot' or 'futures')
+        futures_type: Type of futures ('um' or 'cm')
+        granularity: Data granularity ('daily' or 'monthly')
+        symbol: Trading pair symbol (e.g., 'BTCUSDT')
+
+    Returns:
+        Path to the data directory containing parquet files
+    """
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
     data_dir = project_root / 'data'
 
-    if data_type == 'spot':
-        return data_dir / f'dataset-raw-{granularity}-compressed-optimized' / 'spot'
-    else:
-        return data_dir / f'dataset-raw-{granularity}-compressed-optimized' / f'futures-{futures_type}'
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+
+    # Build ticker-based path: data/btcusdt-spot/raw-parquet-merged-daily/
+    ticker_name = f"{symbol.lower()}-{data_type}"
+    if data_type == 'futures':
+        ticker_name = f"{symbol.lower()}-{data_type}-{futures_type}"
+
+    return data_dir / ticker_name / f'raw-parquet-merged-{granularity}'
 
 
-def read_parquet_files_optimized(raw_dataset_path, file):
+def read_parquet_chunked(file_path, chunk_size=500_000):
     """
-    Reads Parquet files in an optimized way, selecting columns and types.
-    The .isBuyerMaker. column is essential for imbalance calculation.
-    """
-    parquet_pattern = os.path.join(raw_dataset_path, file)
-    df_dask = dd.read_parquet(
-        parquet_pattern,
-        columns=['price', 'qty', 'quoteQty', 'time', 'isBuyerMaker'], # 'isBuyerMaker' é crucial
-        engine='pyarrow',
-        dtype={
-            'price': 'float32',
-            'qty': 'float32',
-            'quoteQty': 'float32',
-            'isBuyerMaker': 'bool'
-        }
-    )
-    return df_dask
+    Reads a Parquet file in memory-efficient chunks using PyArrow.
 
-def process_partition_data(df):
+    Args:
+        file_path: Path to the parquet file
+        chunk_size: Number of rows per chunk
+
+    Yields:
+        pandas DataFrames with the required columns
     """
-    Atribui 'side' com base na mudança de preço e calcula 'net_volumes'
-    for a single data partition (Pandas DataFrame).
+    parquet_file = pq.ParquetFile(file_path)
+
+    columns = ['price', 'qty', 'quoteQty', 'time', 'isBuyerMaker']
+
+    for batch in parquet_file.iter_batches(batch_size=chunk_size, columns=columns):
+        df = batch.to_pandas()
+
+        # Convert types for memory efficiency
+        df['price'] = df['price'].astype('float32')
+        df['qty'] = df['qty'].astype('float32')
+        df['quoteQty'] = df['quoteQty'].astype('float32')
+
+        yield df
+
+
+def process_chunk_data(df):
     """
-    # 1. Atribui o lado da negociação
+    Assigns 'side' based on price change and calculates 'net_volumes'
+    for a single data chunk (Pandas DataFrame).
+    """
+    # 1. Assign trade side
     df['side'] = np.where(df['price'].shift() > df['price'], 1,
                           np.where(df['price'].shift() < df['price'], -1, np.nan))
 
-    # Preenche os valores nulos (gerados pelo shift() e por preços iguais)
+    # Fill null values
     df['side'] = df['side'].ffill().fillna(1).astype('int8')
 
-    # 2. Calcula os volumes líquidos (net_volumes)
+    # 2. Calculate net volumes
     df['net_volumes'] = df['quoteQty'] * df['side']
 
     return df
 
 
-def apply_operations_optimized(df_dask, meta):
-    """
-    Aplica as operações de processamento em cada partição do Dask DataFrame.
-    """
-    # Agora, a função `process_partition_data` retorna um DataFrame que corresponde
-    # exatamente à estrutura definida em `meta`, incluindo 'net_volumes'.
-    return df_dask.map_partitions(process_partition_data, meta=meta)
-
 # ==============================================================================
-# SEÇÃO DO ALGORITMO DE GERAÇÃO DE BARRAS (NUMBA)
+# BAR GENERATION ALGORITHM (NUMBA)
 # ==============================================================================
 
 @njit(
     types.Tuple((
-        # Assinatura de retorno para a lista de barras (14 elementos por barra)
-        # start_time(int64), end_time(int64), open, high, low, close, theta_k, buy_vol, total_vol_usd, total_vol, ticks, ticks_buy, ewma_T, ewma_imbalance
         types.ListType(types.Tuple((
             types.int64, types.int64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64
         ))),
-        # Assinatura de retorno para o estado final do sistema (15 elementos)
-        # open, high, low, close, start_time(int64), end_time(int64), imbalance, buy_vol, total_vol_usd, total_vol, ticks, ticks_buy, ewma_T, ewma_imbalance, warm
         types.Tuple((
             types.float64, types.float64, types.float64, types.float64, types.int64,
             types.int64, types.float64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64, types.boolean
         )),
     ))(
-        # Assinaturas dos argumentos de entrada
-        types.float64[:],       # prices
-        types.int64[:],         # times (agora int64 - timestamps em milissegundos)
-        types.float64[:],       # net_volumes
-        types.int8[:],          # sides
-        types.float64[:],       # qtys
-        types.float64,          # alpha_ticks
-        types.float64,          # alpha_imbalance
-        types.Tuple((           # system_state (15 elementos)
+        types.float64[:],
+        types.int64[:],
+        types.float64[:],
+        types.int8[:],
+        types.float64[:],
+        types.float64,
+        types.float64,
+        types.Tuple((
             types.float64, types.float64, types.float64, types.float64, types.int64,
             types.int64, types.float64, types.float64, types.float64, types.float64,
             types.float64, types.float64, types.float64, types.float64, types.boolean
         )),
-        types.float64,          # init_ticks
-        types.float64           # time_reset (NOVO)
+        types.float64,
+        types.float64
     )
 )
-def process_partition_imbalance_numba(
+def process_chunk_imbalance_numba(
     prices, times, net_volumes, sides, qtys, alpha_ticks, alpha_imbalance, system_state, init_ticks, time_reset
 ):
-    """Processes a data partition with Numba to generate bars."""
+    """Processes a data chunk with Numba to generate bars."""
     bar_open, bar_high, bar_low, bar_close, bar_start_time, bar_end_time, \
     current_imbalance, buy_volume_usd, total_volume_usd, total_volume, \
     ticks, ticks_buy, ewma_T, ewma_imbalance, warm = system_state
@@ -166,15 +160,13 @@ def process_partition_imbalance_numba(
     else:
         threshold = ewma_T * ewma_imbalance
 
-    # Converte time_reset (em horas) para milissegundos para comparação
-    # 1 hora = 3.600 segundos = 3.600.000 milissegundos
     time_reset_ms = 3_600_000.0 * time_reset
 
     bars = List()
 
     for i in range(len(prices)):
         ticks += 1
-        # print(times[i])
+
         if np.isnan(bar_open):
             bar_open = prices[i]
             bar_start_time = times[i]
@@ -194,7 +186,6 @@ def process_partition_imbalance_numba(
 
         time_since_bar_start = times[i] - bar_start_time
 
-        # A variável de gatilho muda dependendo se estamos no período 'warm'
         if warm:
             trigger_var = ticks
         else:
@@ -203,7 +194,6 @@ def process_partition_imbalance_numba(
         if trigger_var >= threshold:
             bar_end_time = times[i]
 
-            # Atualiza os EWMAs. A primeira atualização é uma simples atribuição.
             if warm:
                 ewma_T = ticks
                 ewma_imbalance = abs(current_imbalance) / ticks
@@ -218,13 +208,10 @@ def process_partition_imbalance_numba(
                 ticks, ticks_buy, ewma_T, ewma_imbalance
             ))
 
-            # Reseta o estado para a próxima barra
             bar_open, bar_high, bar_low, bar_close = np.nan, -np.inf, np.inf, np.nan
-            bar_start_time, bar_end_time = 0, 0  # int64: 0 indica sem valor
+            bar_start_time, bar_end_time = 0, 0
             current_imbalance, buy_volume_usd, total_volume_usd, total_volume, ticks, ticks_buy = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-            # Atualiza o threshold para a próxima barra.
-            # Se a barra demorou mais que `time_reset_ms`, reseta para o estado inicial.
             if time_since_bar_start > time_reset_ms:
                 warm = True
                 threshold = init_ticks
@@ -238,20 +225,16 @@ def process_partition_imbalance_numba(
     )
     return bars, final_state
 
-# ==============================================================================
-# SEÇÃO DE ORQUESTRAÇÃO E PROCESSAMENTO PRINCIPAL
-# ==============================================================================
 
-def create_imbalance_dollar_bars_numba(partition, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset):
-    """Função wrapper para processar uma partição com Numba."""
-    prices = partition['price'].values.astype(np.float64)
-    # Converte datetime64[ms] para timestamp em milissegundos (int64)
-    times = partition['time'].values.astype('datetime64[ms]').astype(np.int64)
-    net_volumes = partition['net_volumes'].values.astype(np.float64)
-    sides = partition['side'].values.astype(np.int8)
-    qtys = partition['qty'].values.astype(np.float64)
+def create_imbalance_dollar_bars_numba(chunk, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset):
+    """Wrapper function to process a chunk with Numba."""
+    prices = chunk['price'].values.astype(np.float64)
+    times = chunk['time'].values.astype('datetime64[ms]').astype(np.int64)
+    net_volumes = chunk['net_volumes'].values.astype(np.float64)
+    sides = chunk['side'].values.astype(np.int8)
+    qtys = chunk['qty'].values.astype(np.float64)
 
-    bars, system_state = process_partition_imbalance_numba(
+    bars, system_state = process_chunk_imbalance_numba(
         prices, times, net_volumes, sides, qtys,
         alpha_ticks, alpha_imbalance, system_state, init_ticks, time_reset
     )
@@ -267,35 +250,60 @@ def create_imbalance_dollar_bars_numba(partition, system_state, alpha_ticks, alp
     return df_bars, system_state
 
 
-def batch_create_imbalance_dollar_bars_optimized(df_dask, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset):
-    """Processes partitions in batch to create bars."""
+def process_file_chunks(file_path, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset, chunk_size=500_000):
+    """Process a single file in chunks."""
     results = []
-    for partition_num in range(df_dask.npartitions):
-        logging.info(f'Processing partition {partition_num + 1} de {df_dask.npartitions}')
-        part = df_dask.get_partition(partition_num).compute()
+    chunk_num = 0
 
+    for chunk in read_parquet_chunked(file_path, chunk_size):
+        chunk_num += 1
+
+        # Process chunk data
+        chunk = process_chunk_data(chunk)
+
+        # Generate bars
         bars, system_state = create_imbalance_dollar_bars_numba(
-            part, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset
+            chunk, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset
         )
+
         if not bars.empty:
             results.append(bars)
 
-    return pd.concat(results, ignore_index=True) if results else pd.DataFrame(), system_state
+        # Clean up
+        del chunk
+        gc.collect()
+
+    if results:
+        return pd.concat(results, ignore_index=True), system_state
+    else:
+        return pd.DataFrame(), system_state
 
 
 def process_files_and_generate_bars(
     data_type='futures', futures_type='um', granularity='daily',
     init_ticks=1_000, alpha_ticks=0.9,
-    alpha_imbalance=0.9, output_dir=None, time_reset=5.0, db_engine=None
+    alpha_imbalance=0.9, output_dir=None, time_reset=5.0, db_engine=None,
+    symbol='BTCUSDT'
 ):
-    """Função principal que orquestra todo o processo."""
-    output_dir = Path(output_dir)
+    """Main function that orchestrates the entire process."""
+    # Build ticker-based output directory inside data/
+    ticker_name = f"{symbol.lower()}-{data_type}"
+    if data_type == 'futures':
+        ticker_name = f"{symbol.lower()}-{data_type}-{futures_type}"
 
-    raw_dataset_path = get_data_path(data_type, futures_type, granularity)
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
 
+    if output_dir is None:
+        output_dir = project_root / 'data' / ticker_name / 'output' / 'imbalance'
+    else:
+        output_dir = Path(output_dir) / ticker_name / 'output' / 'imbalance'
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Output directory: {output_dir}")
+
+    raw_dataset_path = get_data_path(data_type, futures_type, granularity, symbol)
 
     logging.info(f"Data path: {raw_dataset_path}")
-
 
     if not raw_dataset_path.exists():
         logging.error(f"Data directory not found: {raw_dataset_path}")
@@ -307,25 +315,17 @@ def process_files_and_generate_bars(
         return
     logging.info(f"Found {len(files)} Parquet files")
 
-    meta = pd.DataFrame({
-        'price': pd.Series(dtype='float32'), 'qty': pd.Series(dtype='float32'),
-        'quoteQty': pd.Series(dtype='float32'), 'time': pd.Series(dtype='int64'),
-        'isBuyerMaker': pd.Series(dtype='bool'), 'side': pd.Series(dtype='int8'),
-        'net_volumes': pd.Series(dtype='float64')
-    })
-
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     output_file_prefix = f'{data_type}-ticks{init_ticks}-aticks{alpha_ticks}-aimb{alpha_imbalance}-treset{time_reset}'
     output_file_prefix_parquet = f'{timestamp}-imbalance-{data_type}-ticks{init_ticks}-aticks{alpha_ticks}-aimb{alpha_imbalance}-treset{time_reset}'
 
-    # O estado inicial precisa ter 15 elementos, incluindo 'warm'
-    # start_time e end_time agora são int64 (0 indica sem valor)
+    # Initial state (15 elements)
     system_state = (
-        np.nan, -np.inf, np.inf, np.nan, 0, 0,  # bar_open, high, low, close, start_time(int64), end_time(int64) (6)
-        0.0, 0.0, 0.0, 0.0,                     # current_imbalance, buy_volume_usd, total_volume_usd, total_volume (4)
-        0.0, 0.0,                               # ticks, ticks_buy (2)
-        float(init_ticks), 0.0,                 # ewma_T, ewma_imbalance (2) - ewma_imbalance começa em 0.0
-        True                                    # warm (1)
+        np.nan, -np.inf, np.inf, np.nan, 0, 0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0,
+        float(init_ticks), 0.0,
+        True
     )
 
     results = []
@@ -334,17 +334,15 @@ def process_files_and_generate_bars(
         logging.info(f"Processing file {i + 1}/{len(files)}: {file}")
         start_time_file = time.time()
 
-        df_dask = read_parquet_files_optimized(str(raw_dataset_path), file)
-        df_dask = apply_operations_optimized(df_dask, meta)
+        file_path = raw_dataset_path / file
 
-        bars, system_state = batch_create_imbalance_dollar_bars_optimized(
-            df_dask, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset
+        bars, system_state = process_file_chunks(
+            file_path, system_state, alpha_ticks, alpha_imbalance, init_ticks, time_reset
         )
-        # print(bars)
+
         if not bars.empty:
             results.append(bars)
             if db_engine:
-                # Converte timestamps de milissegundos para datetime
                 bars['end_time'] = pd.to_datetime(bars['end_time'], unit='ms')
                 bars.drop(columns=['start_time'], inplace=True)
                 bars['type'] = 'Imbalance'
@@ -352,22 +350,24 @@ def process_files_and_generate_bars(
                 bars['sample'] = output_file_prefix
                 with db_engine.connect() as conn:
                     bars.to_sql(
-                        name='dollar_bars',  # O nome da sua tabela no PostgreSQL
-                        con=conn,             # A conexão que o pandas deve usar
-                        if_exists='append',     # O que fazer se a tabela já existir: 'append' = adicionar
-                        index=False             # NÃO criar uma coluna para o índice do DataFrame
-                        )
-                    print("✅ Dados inseridos com sucesso no banco!")
+                        name='dollar_bars',
+                        con=conn,
+                        if_exists='append',
+                        index=False
+                    )
+                    print("Data inserted successfully!")
 
             elapsed_time = (time.time() - start_time_file) / 60
-            logging.info(f"{len(bars)} bars generated. Tempo: {elapsed_time:.2f} min.")
+            logging.info(f"{len(bars)} bars generated. Time: {elapsed_time:.2f} min.")
         else:
             logging.warning(f"No bars generated for file {file}")
 
+        gc.collect()
+
     if results:
         all_bars = pd.concat(results, ignore_index=True)
-        # Converte timestamps de milissegundos para datetime
         all_bars['end_time'] = pd.to_datetime(all_bars['end_time'], unit='ms')
+        all_bars['start_time'] = pd.to_datetime(all_bars['start_time'], unit='ms')
         all_bars.drop(columns=['start_time'], inplace=True)
 
         final_path = output_dir / f'{output_file_prefix_parquet}.parquet'
@@ -375,26 +375,48 @@ def process_files_and_generate_bars(
         logging.info(f"\nProcessing complete! Final file saved at: {final_path}")
         logging.info(f"Total bars in final file: {len(all_bars)}")
 
+        # Ask user if they want to run global_analysis.py
+        run_analysis = input("\nDo you want to run global_analysis.py to see the sampling results? (y/n): ").strip().lower()
+        if run_analysis == 'y':
+            import subprocess
+            import re
+            analysis_script = Path(__file__).resolve().parent.parent.parent.parent / 'notebooks' / 'global_analysis.py'
+
+            # Update the dataset path in global_analysis.py
+            with open(analysis_script, 'r') as f:
+                content = f.read()
+
+            # Replace the dataset_path line
+            content = re.sub(
+                r'dataset_path = "[^"]*"',
+                f'dataset_path = "{final_path}"',
+                content
+            )
+
+            # Change to analyze_imbalance_bars
+            content = re.sub(
+                r'analyze_standard_bars\(dataset_path\)',
+                'analyze_imbalance_bars(dataset_path)',
+                content
+            )
+
+            with open(analysis_script, 'w') as f:
+                f.write(content)
+
+            logging.info(f"Running analysis script: {analysis_script}")
+            subprocess.run(['python', str(analysis_script)])
+
 if __name__ == '__main__':
     data_type = 'futures'
     futures_type = 'um'
     granularity = 'daily'
     output_dir = './output/'
 
-    # TESTE ÚNICO - Parâmetros razoáveis
-    params = [[1000, 0.5, 0.5, 5.0]]  # init_ticks=1000, alpha_ticks=50%, alpha_imbalance=50%, time_reset=5h
-
-    # GRID SEARCH COMPLETO (comentado) - Descomente para rodar todos os 90 testes
-    # params = [[init_ticks, alpha_ticks/100, alpha_imbalance/100, time_reset]
-    #             for init_ticks in range(1000, 1200, 200)
-    #             for alpha_ticks in range(10, 100, 30)
-    #             for alpha_imbalance in range(10, 100, 30)
-    #             for time_reset in range(1, 11)]
+    # Single test - reasonable parameters
+    params = [[1000, 0.5, 0.5, 5.0]]
 
     setup_logging()
-    client = setup_dask_client(n_workers=10, threads_per_worker=1, memory_limit='6GB')
 
-    # engine = create_engine(db_url)
     engine = None
 
     try:
@@ -410,12 +432,9 @@ if __name__ == '__main__':
             )
 
             end_time_sample = time.time()
-            logging.info(f"Tempo total da amostra: {(end_time_sample - start_time_sample) / 60:.2f} minutos.")
-            logging.info("Forçando a coleta de lixo antes da próxima amostra...")
+            logging.info(f"Total sample time: {(end_time_sample - start_time_sample) / 60:.2f} minutes.")
             gc.collect()
     finally:
-        logging.info("Fechando o cliente Dask.")
-        client.close()
         if engine is not None:
-            logging.info("Dispondo do engine do banco de dados.")
+            logging.info("Disposing database engine.")
             engine.dispose()

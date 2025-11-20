@@ -551,6 +551,29 @@ def process_files_and_generate_bars(
         logging.info(f"\nProcessing complete! Final file saved at: {final_path}")
         logging.info(f"Total bars in final file: {len(all_bars)}")
 
+        # Ask user if they want to run global_analysis.py
+        run_analysis = input("\nDo you want to run global_analysis.py to see the sampling results? (y/n): ").strip().lower()
+        if run_analysis == 'y':
+            import subprocess
+            analysis_script = Path(__file__).resolve().parent.parent.parent.parent / 'notebooks' / 'global_analysis.py'
+            # Update the dataset path in global_analysis.py
+            with open(analysis_script, 'r') as f:
+                content = f.read()
+
+            # Replace the dataset_path line
+            import re
+            content = re.sub(
+                r'dataset_path = "[^"]*"',
+                f'dataset_path = "{final_path}"',
+                content
+            )
+
+            with open(analysis_script, 'w') as f:
+                f.write(content)
+
+            logging.info(f"Running analysis script: {analysis_script}")
+            subprocess.run(['python', str(analysis_script)])
+
 if __name__ == '__main__':
     data_type = 'futures'
     futures_type = 'um'

@@ -73,11 +73,11 @@ binance-tick-data-manager/
 │   │   ├── raw-zip-daily/            # Downloaded ZIPs
 │   │   ├── raw-parquet-daily/        # Individual Parquets
 │   │   ├── raw-parquet-merged-daily/ # Merged Parquets (~10GB)
-│   │   ├── output/                   # Generated features
 │   │   └── logs/                     # Local logs
 │   ├── btcusdt-futures-um/           # Futures USD-M
 │   └── logs/                         # Global logs
-├── output/                    # Features (organized by ticker)
+├── output/                    # Generated features (per ticker)
+│   └── btcusdt-spot/                 # Standard/Imbalance Dollar Bars
 └── notebooks/                 # Exploratory analysis
 ```
 
@@ -116,9 +116,9 @@ import pandas as pd
 # Single file
 df = pd.read_parquet("data/btcusdt-spot/raw-parquet-merged-daily/merged_part_0.parquet")
 
-# Multiple files with Dask (files larger than RAM)
-import dask.dataframe as dd
-df = dd.read_parquet("data/btcusdt-spot/raw-parquet-merged-daily/*.parquet")
+# Multiple files
+import pyarrow.parquet as pq
+df = pq.read_table("data/btcusdt-spot/raw-parquet-merged-daily/").to_pandas()
 ```
 
 ### Reading Dollar Bars
@@ -127,7 +127,7 @@ df = dd.read_parquet("data/btcusdt-spot/raw-parquet-merged-daily/*.parquet")
 import pandas as pd
 
 # Standard Dollar Bars
-df = pd.read_parquet("data/btcusdt-spot/output/standard_dollar_bars.parquet")
+df = pd.read_parquet("output/btcusdt-spot/standard_dollar_bars.parquet")
 
 # Imbalance Dollar Bars
 df = pd.read_parquet("output/btcusdt-spot/imbalance_dollar_bars.parquet")
@@ -152,7 +152,6 @@ df = pd.read_parquet("output/btcusdt-spot/imbalance_dollar_bars.parquet")
 ### Technologies
 
 - **PyArrow**: Parquet read/write
-- **Dask**: Processing files larger than RAM
 - **Pandas**: DataFrame manipulation
 - **httpx**: Async HTTP downloads
 

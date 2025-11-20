@@ -12,8 +12,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Iterator
-import logging
-import json
 from datetime import datetime
 from loguru import logger
 import numpy as np
@@ -117,10 +115,6 @@ class ZipToParquetStreamer:
 
         self.compressed_dir.mkdir(parents=True, exist_ok=True)
 
-        # Progress tracking
-        self.progress_file = self.base_dir / f"streaming_progress_{symbol}_{data_type}_{granularity}.json"
-        self.progress = self.load_progress()
-
         # Configure logging
         self.setup_logging()
 
@@ -134,22 +128,6 @@ class ZipToParquetStreamer:
         logger.add(log_file, rotation="500 MB", retention="10 days")
 
         self.logger = logger
-
-    def load_progress(self) -> dict:
-        """Load progress from tracking file"""
-        if self.progress_file.exists():
-            with open(self.progress_file, 'r') as f:
-                return json.load(f)
-        return {
-            "converted": [],
-            "failed": [],
-            "skipped": []
-        }
-
-    def save_progress(self):
-        """Save progress to tracking file"""
-        with open(self.progress_file, 'w') as f:
-            json.dump(self.progress, f, indent=2)
 
     def verify_checksum(self, zip_path: Path) -> bool:
         """Verify ZIP file checksum if exists"""
@@ -283,8 +261,6 @@ class ZipToParquetStreamer:
             # Verify checksum
             if not self.verify_checksum(zip_path):
                 self.logger.error(f"Checksum verification failed for {zip_path.name}")
-                self.progress["failed"].append(str(zip_path))
-                self.save_progress()
                 return None
 
             self.logger.info(f"Converting {zip_path.name} to Parquet...")
@@ -348,10 +324,6 @@ class ZipToParquetStreamer:
                     f"({total_rows:,} rows, {file_size_mb:.2f} MB)"
                 )
 
-                # Update progress
-                self.progress["converted"].append(str(zip_path))
-                self.save_progress()
-
                 return output_path
 
             else:
@@ -360,8 +332,6 @@ class ZipToParquetStreamer:
 
         except Exception as e:
             self.logger.error(f"Failed to convert {zip_path.name}: {str(e)}")
-            self.progress["failed"].append(str(zip_path))
-            self.save_progress()
             return None
 
     def _create_arrow_batch(self, data: List[Dict]) -> pa.RecordBatch:
@@ -470,12 +440,17 @@ class ZipToParquetStreamer:
 
         self.logger.info(f"Found {len(zip_files)} ZIP files to process")
 
-        # Filter files to process
+        # Filter files to process (check if output parquet exists)
         files_to_process = []
         skip_count = 0
 
         for zip_path in zip_files:
-            if str(zip_path) in self.progress["converted"] and skip_existing:
+            # Check if output parquet already exists
+            zip_name = zip_path.stem
+            parquet_name = f"{zip_name}.parquet"
+            output_path = self.compressed_dir / parquet_name
+
+            if output_path.exists() and skip_existing:
                 skip_count += 1
                 continue
             files_to_process.append(zip_path)
@@ -563,31 +538,16 @@ class ZipToParquetStreamer:
 
         return success_count, skip_count, fail_count
 
-    def reset_progress(self):
-        """Reset progress tracking"""
-        self.progress = {
-            "converted": [],
-            "failed": [],
-            "skipped": []
-        }
-        self.save_progress()
-        self.logger.info("Progress tracking reset")
-
     def get_statistics(self) -> Dict:
         """Get conversion statistics"""
+        # Count actual parquet files
+        parquet_files = list(self.compressed_dir.glob(f"{self.symbol}-*.parquet"))
+        total_parquet_size = sum(pf.stat().st_size for pf in parquet_files)
+
         stats = {
-            "total_converted": len(self.progress["converted"]),
-            "total_failed": len(self.progress["failed"]),
-            "total_skipped": len(self.progress["skipped"])
+            "total_parquet_files": len(parquet_files),
+            "total_parquet_size_gb": total_parquet_size / (1024**3)
         }
-
-        # Calculate sizes
-        total_parquet_size = 0
-        parquet_files = self.compressed_dir.glob(f"{self.symbol}-*.parquet")
-        for pf in parquet_files:
-            total_parquet_size += pf.stat().st_size
-
-        stats["total_parquet_size_gb"] = total_parquet_size / (1024**3)
 
         return stats
 
@@ -611,8 +571,6 @@ def main():
                        help="Rows to process per chunk")
     parser.add_argument("--delete-zip", action="store_true",
                        help="Delete ZIP files after successful conversion")
-    parser.add_argument("--reset", action="store_true",
-                       help="Reset progress tracking")
 
     args = parser.parse_args()
 
@@ -626,9 +584,6 @@ def main():
         chunk_size=args.chunk_size
     )
 
-    if args.reset:
-        converter.reset_progress()
-
     # Process all ZIPs
     success, skip, fail = converter.process_all_zips(
         skip_existing=True,
@@ -638,8 +593,7 @@ def main():
     # Show statistics
     stats = converter.get_statistics()
     print(f"\n📊 Conversion Statistics:")
-    print(f"  Total Converted: {stats['total_converted']}")
-    print(f"  Total Failed: {stats['total_failed']}")
+    print(f"  Total Parquet Files: {stats['total_parquet_files']}")
     print(f"  Total Parquet Size: {stats['total_parquet_size_gb']:.2f} GB")
 
 
